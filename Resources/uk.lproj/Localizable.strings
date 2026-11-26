@@ -1,0 +1,53 @@
+/* AudioHub — українська */
+
+/* Menu */
+"Search the network for speakers again" = "Знову знайти колонки в мережі";
+"No apps are playing audio.\nStart playback and the app will appear here." = "Немає програм зі звуком.\nУвімкни відтворення — програма з’явиться тут.";
+"Quit" = "Вийти";
+"On the network: Chromecast %ld, AirPlay %ld" = "У мережі: Chromecast %ld, AirPlay %ld";
+"Unchanged" = "Як зазвичай";
+"This Mac" = "Цей Mac";
+"%@ (offline)" = "%@ (немає в мережі)";
+" (default)" = " (за замовчуванням)";
+"The speaker’s own volume" = "Гучність самої колонки";
+"Volume of this app" = "Гучність цієї програми";
+
+"Language" = "Мова";
+"System language" = "Мова системи";
+
+/* Master volume */
+"Mute all speakers" = "Вимкнути звук на всіх колонках";
+"Unmute" = "Увімкнути звук";
+"off" = "вимк";
+"Overall volume of everything AudioHub plays" = "Загальна гучність усього, що веде AudioHub";
+
+/* Stereo pair */
+"Stereo pair" = "Стереопара";
+"L %@ + R %@" = "Л %@ + П %@";
+"Left" = "Лівий";
+"Right" = "Правий";
+"Pick two different speakers." = "Потрібні дві різні колонки.";
+"Offset" = "Зсув";
+"0 ms" = "0 мс";
+"%@ ms" = "%@ мс";
+"right is %ld ms later" = "правий пізніше на %ld мс";
+"left is %ld ms later" = "лівий пізніше на %ld мс";
+"Calibration clicks" = "Клацання для налаштування";
+"Pick the speakers, then choose “Stereo pair” for an app. Sound arrives ≈2–5 s late." = "Обери колонки, потім у потрібної програми обери «Стереопара». Звук надходить із затримкою ≈2–5 с.";
+"Every 10 s there is a long beep: first line up the beeps (« »), then the clicks (‹ ›). The slider holds back whichever speaker sounds first." = "Раз на 10 с лунає довгий гудок: спершу суміщай гудки (кнопки « »), потім точніше клацання (‹ ›). Повзунок затримує ту колонку, що звучить раніше.";
+"Turn on the clicks to line the speakers up. After a pause or rebuffering on Chromecast the offset may drift." = "Увімкни клацання, щоб вирівняти колонки. Після паузи чи довантаження на Chromecast зсув може попливти.";
+"stereo pair: L — %@, R — %@" = "стереопара: Л — %@, П — %@";
+
+/* Status */
+"connecting to “%@”…" = "підключаюся до «%@»…";
+"▶ playing on “%@”" = "▶ грає на «%@»";
+"▶ playing on “%@” (≈2 s delay)" = "▶ грає на «%@» (затримка ≈2 с)";
+"“%@” is buffering…" = "«%@» довантажує звук…";
+"no audio from the app" = "немає звуку від програми";
+
+/* Errors */
+"Could not capture audio: %@" = "Не вдалося перехопити звук: %@";
+"Output device is not connected." = "Пристрій виведення не підключено.";
+"Choose two different speakers for the stereo pair." = "Обери дві різні колонки для стереопари.";
+"Speaker “%@” was not found on the network." = "Колонку «%@» не знайдено в мережі.";
+"Unknown destination %@." = "Невідоме призначення %@.";

@@ -1,0 +1,2 @@
+"NSAudioCaptureUsageDescription" = "AudioHub перехватывает звук выбранных приложений, чтобы отправить его на другие колонки.";
+"NSLocalNetworkUsageDescription" = "AudioHub находит колонки Chromecast и AirPlay в домашней сети и передаёт на них звук.";

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>local.audiohub</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>ru</string>
+        <string>uk</string>
+    </array>
+    <key>CFBundleName</key><string>AudioHub</string>
+    <key>CFBundleDisplayName</key><string>AudioHub</string>
+    <key>CFBundleExecutable</key><string>audiohub</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.2</string>
+    <key>LSUIElement</key><true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>AudioHub captures the sound of the apps you choose to send it to other speakers.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>AudioHub finds Chromecast and AirPlay speakers on your home network and streams sound to them.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_googlecast._tcp</string>
+        <string>_raop._tcp</string>
+        <string>_airplay._tcp</string>
+    </array>
+</dict>
+</plist>

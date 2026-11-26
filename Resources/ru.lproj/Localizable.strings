@@ -1,0 +1,53 @@
+/* AudioHub — русский */
+
+/* Menu */
+"Search the network for speakers again" = "Заново найти колонки в сети";
+"No apps are playing audio.\nStart playback and the app will appear here." = "Нет приложений со звуком.\nЗапусти воспроизведение — приложение появится здесь.";
+"Quit" = "Выйти";
+"On the network: Chromecast %ld, AirPlay %ld" = "В сети: Chromecast %ld, AirPlay %ld";
+"Unchanged" = "Как обычно";
+"This Mac" = "Этот Mac";
+"%@ (offline)" = "%@ (нет в сети)";
+" (default)" = " (по умолчанию)";
+"The speaker’s own volume" = "Громкость самой колонки";
+"Volume of this app" = "Громкость этого приложения";
+
+"Language" = "Язык";
+"System language" = "Язык системы";
+
+/* Master volume */
+"Mute all speakers" = "Выключить звук на всех колонках";
+"Unmute" = "Включить звук";
+"off" = "выкл";
+"Overall volume of everything AudioHub plays" = "Общая громкость всего, что ведёт AudioHub";
+
+/* Stereo pair */
+"Stereo pair" = "Стереопара";
+"L %@ + R %@" = "Л %@ + П %@";
+"Left" = "Левый";
+"Right" = "Правый";
+"Pick two different speakers." = "Нужны две разные колонки.";
+"Offset" = "Сдвиг";
+"0 ms" = "0 мс";
+"%@ ms" = "%@ мс";
+"right is %ld ms later" = "правый позже на %ld мс";
+"left is %ld ms later" = "левый позже на %ld мс";
+"Calibration clicks" = "Щелчки для настройки";
+"Pick the speakers, then choose “Stereo pair” for an app. Sound arrives ≈2–5 s late." = "Выбери колонки, затем у нужного приложения выбери «Стереопара». Звук идёт с задержкой ≈2–5 с.";
+"Every 10 s there is a long beep: first line up the beeps (« »), then the clicks (‹ ›). The slider holds back whichever speaker sounds first." = "Раз в 10 с звучит длинный гудок: сначала совмести гудки (кнопки « »), потом точнее щелчки (‹ ›). Ползунок задерживает ту колонку, что звучит раньше.";
+"Turn on the clicks to line the speakers up. After a pause or rebuffering on Chromecast the offset may drift." = "Включи щелчки, чтобы выровнять колонки. После паузы или подгрузки на Chromecast сдвиг может уплыть.";
+"stereo pair: L — %@, R — %@" = "стереопара: Л — %@, П — %@";
+
+/* Status */
+"connecting to “%@”…" = "подключаюсь к «%@»…";
+"▶ playing on “%@”" = "▶ играет на «%@»";
+"▶ playing on “%@” (≈2 s delay)" = "▶ играет на «%@» (задержка ≈2 с)";
+"“%@” is buffering…" = "«%@» подгружает звук…";
+"no audio from the app" = "нет звука от приложения";
+
+/* Errors */
+"Could not capture audio: %@" = "Не удалось перехватить звук: %@";
+"Output device is not connected." = "Устройство вывода не подключено.";
+"Choose two different speakers for the stereo pair." = "Выбери две разные колонки для стереопары.";
+"Speaker “%@” was not found on the network." = "Колонка «%@» не найдена в сети.";
+"Unknown destination %@." = "Неизвестное назначение %@.";
