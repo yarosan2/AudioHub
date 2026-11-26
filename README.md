@@ -1,8 +1,9 @@
 # AudioHub
 
+
 **Per-app audio routing for macOS — to local outputs, Chromecast and AirPlay speakers.**
 
-[Русский](README.ru.md)
+<img width="390" height="647" alt="Знімок екрана 2026-11-26 о 21 51 25" src="https://github.com/user-attachments/assets/85764a47-a6b8-4483-a068-ac4feaaed5d1" />
 
 AudioHub lives in the menu bar and lets you choose, for every app, where its sound goes:
 music to a Chromecast speaker, a web radio to an AirPlay speaker, system sounds stay on your
@@ -40,6 +41,7 @@ cd AudioHub
 scripts/make-signing-cert.sh   # once, see "Permissions" below
 scripts/install.sh             # builds and copies AudioHub to /Applications
 ```
+Or download the latest release.
 
 On first use macOS asks for two permissions:
 
