@@ -21,26 +21,51 @@ enum SelfTest {
     /// relative to the current directory, i.e. run it from the repository root).
     static var fixturesDir = "Tests/Fixtures"
 
+    static let all: [(name: String, run: () -> Void)] = [
+        ("ringBuffer", ringBuffer),
+        ("ringBufferStress", ringBufferStress),
+        ("alacFraming", alacFraming),
+        ("airplayResend", airplayResend),
+        ("stereoDelay", stereoDelay),
+        ("httpValidation", httpValidation),
+        ("httpServerLive", httpServerLive),
+        ("chromecastFixture", chromecastFixture),
+        ("streamBackpressure", streamBackpressure),
+        ("sampleRateHandoff", sampleRateHandoff),
+        ("updateVersions", updateVersions),
+        ("updateReleaseParsing", updateReleaseParsing),
+        ("updateSignatures", updateSignatures),
+        ("updateCodeIdentity", updateCodeIdentity),
+        ("updateInstallFlow", updateInstallFlow),
+        ("castFraming", castFraming),
+        ("protobufDecoding", protobufDecoding),
+        ("rtspParsing", rtspParsing),
+        ("rtspLive", rtspLive),
+    ]
+
+    /// Deliberate data race, run only via `--only tsanCanary` under ThreadSanitizer.
+    /// If TSan does not report it, the sanitizer is not working and a "clean" run means nothing.
+    static func tsanCanary() {
+        final class Box { var value = 0.0 }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { var s = 0.0; for _ in 0 ..< 1_000_000 { s += box.value }; _ = s; done.signal() }
+        Thread.detachNewThread { box.value = 1; done.signal() }
+        done.wait(); done.wait()
+        print("CANARY  deliberate race executed — ThreadSanitizer must report it")
+    }
+
+    /// `selftest [--fixtures <dir>] [--only <name>[,<name>…]]`
     static func run(arguments: [String] = []) -> Never {
         if let i = arguments.firstIndex(of: "--fixtures"), i + 1 < arguments.count { fixturesDir = arguments[i + 1] }
-        ringBuffer()
-        ringBufferStress()
-        alacFraming()
-        airplayResend()
-        stereoDelay()
-        httpValidation()
-        httpServerLive()
-        chromecastFixture()
-        streamBackpressure()
-        updateVersions()
-        updateReleaseParsing()
-        updateSignatures()
-        updateCodeIdentity()
-        updateInstallFlow()
-        castFraming()
-        protobufDecoding()
-        rtspParsing()
-        rtspLive()
+        var selected = all
+        if let i = arguments.firstIndex(of: "--only"), i + 1 < arguments.count {
+            let wanted = Set(arguments[i + 1].split(separator: ",").map(String.init))
+            selected = (all + [("tsanCanary", tsanCanary)]).filter { wanted.contains($0.name) }
+            let unknown = wanted.subtracting(selected.map(\.name))
+            if !unknown.isEmpty { print("unknown checks: \(unknown.sorted()); available: \(all.map(\.name))"); exit(2) }
+        }
+        selected.forEach { $0.run() }
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) failed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -159,6 +184,45 @@ enum SelfTest {
         let reply = String(decoding: TCPClient.exchange(port: server.port, live, readBytes: 200), as: UTF8.self)
         check("fixture: real Chromecast request gets 200 + WAV from the live server",
               reply.hasPrefix("HTTP/1.1 200") && reply.contains("RIFF"))
+    }
+
+    /// The audio thread publishes the sample rate while other threads read it.
+    /// Run under ThreadSanitizer to detect a data race; here we also check the values seen.
+    static func sampleRateHandoff() {
+        guard let server = try? PCMStreamServer() else { check("sample rate: server starts", false); return }
+        defer { server.stop() }
+        let air = AirPlaySession(device: AirPlayDevice(name: "test", paths: [], txt: [:]))
+        var seen = Set<Double>(), seenAir = Set<Double>()
+        var waited = false
+        let readerDone = DispatchSemaphore(value: 0)
+        let writerDone = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {   // keeps reading until the writer has finished: the two must overlap
+            repeat {
+                seen.insert(server.sampleRate); seenAir.insert(air.capturedSampleRate)
+            } while writerDone.wait(timeout: .now()) == .timedOut
+            readerDone.signal()
+        }
+        let waiterDone = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            waited = server.waitForAudioFormat(timeout: 3)
+            waiterDone.signal()
+        }
+        usleep(20_000)
+        var block = [Float](repeating: 0, count: 512 * 2)
+        Thread.detachNewThread {   // stands in for the real-time audio thread
+            for _ in 0 ..< 2_000 {
+                block.withUnsafeBufferPointer {
+                    server.consume($0.baseAddress!, frames: 512, sampleRate: 44_100)
+                    air.consume($0.baseAddress!, frames: 512, sampleRate: 44_100)
+                }
+            }
+            writerDone.signal()
+        }
+        _ = readerDone.wait(timeout: .now() + 10)
+        _ = waiterDone.wait(timeout: .now() + 5)
+        check("sample rate: waitForAudioFormat sees the rate set on the audio thread", waited && server.sampleRate == 44_100)
+        check("sample rate: readers only ever see 0 or the real rate", seen.isSubset(of: [0, 44_100]) && seenAir.isSubset(of: [0, 44_100]),
+              "saw \(seen) / \(seenAir)")
     }
 
     /// A client that stops reading must be dropped once it is too far behind, without

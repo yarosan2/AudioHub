@@ -13,6 +13,7 @@ No speakers or permissions needed. Run it from the repository root (it reads
 | Area | What is checked |
 | --- | --- |
 | Lock-free ring | overflow, wrap-around, 20 M values across two threads arrive complete and in order |
+| Sample-rate hand-off | the audio thread publishes the rate while other threads read it and wait for it (both senders); readers only ever see 0 or the real rate |
 | HTTP stream server | request validation (token path, method, client IP, malformed); a live loopback server: 403 before the speaker is known, 200 + WAV header for it, 404/403 otherwise, oversized requests, refusal after stop |
 | Recorded fixtures | `Tests/Fixtures/chromecast-get.http` — the exact request a real Chromecast sends — must stay intact, pass validation, and get 200 + WAV from a live server (see `Tests/Fixtures/README.md`) |
 | Cast framing | frames split/merged across reads, 64 KiB limit, oversized length rejected from the header alone |
@@ -35,12 +36,20 @@ Every incoming request is saved byte for byte; anonymize it as described in
 
 ```bash
 SWIFTFLAGS="-sanitize=thread -Onone" ./build.sh
-DYLD_LIBRARY_PATH="$(dirname "$(find /Library/Developer/CommandLineTools/usr/lib/clang -name 'libclang_rt.tsan_osx_dynamic.dylib' | head -1)")" \
-  build/AudioHub.app/Contents/MacOS/audiohub selftest
+RT="$(dirname "$(find /Library/Developer/CommandLineTools/usr/lib/clang -name 'libclang_rt.tsan_osx_dynamic.dylib' | head -1)")"
+# 1. Canary: a deliberate race. TSan MUST report it, otherwise the sanitizer is not working
+#    in this toolchain and step 2 proves nothing.
+DYLD_LIBRARY_PATH="$RT" build/AudioHub.app/Contents/MacOS/audiohub selftest --only tsanCanary 2>&1 | grep -c "WARNING: ThreadSanitizer"
+# 2. The suite.
+DYLD_LIBRARY_PATH="$RT" build/AudioHub.app/Contents/MacOS/audiohub selftest
 ./build.sh   # rebuild normally afterwards
 ```
 
-Expected: all checks pass, no `WARNING: ThreadSanitizer`.
+A clean run counts only if the canary was reported. With mismatched Command Line Tools
+(Swift/clang 17 compiler, clang 21 sanitizer runtime) TSan starts but misses even trivial
+races — a plain C data race goes unreported — so a run without warnings there is
+inconclusive. Thread-safety of the audio path is therefore designed in (lock-free ring, atomic
+hand-offs via `CAtomics`) rather than inferred from TSan output.
 
 ## Manual checks with real speakers
 

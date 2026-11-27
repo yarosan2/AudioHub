@@ -94,6 +94,22 @@ final class SPSCRing<Element> {
     }
 }
 
+/// A Double published by one thread and read by others, lock-free (stored as its bit pattern).
+/// Stores are release, loads acquire: whatever the writer did before storing is visible to a
+/// reader that sees the new value.
+final class AtomicDouble {
+    private let p: UnsafeMutablePointer<Int64>
+    init(_ v: Double) {
+        p = .allocate(capacity: 1)
+        p.initialize(to: Int64(bitPattern: v.bitPattern))
+    }
+    deinit { p.deallocate() }
+    var value: Double {
+        get { Double(bitPattern: UInt64(bitPattern: ah_load_acquire(p))) }
+        set { ah_store_release(p, Int64(bitPattern: newValue.bitPattern)) }
+    }
+}
+
 /// A Float shared between threads without tearing or locks (stored as its bit pattern).
 final class AtomicFloat {
     private let p: UnsafeMutablePointer<Int64>

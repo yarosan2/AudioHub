@@ -93,7 +93,11 @@ final class AirPlaySession: AudioSink {
     // Audio path: RT thread → lock-free float ring → converter (→44.1k Int16) → packets.
     // Everything on the consumer side is allocated once, when the first audio arrives.
     private let ring = SPSCRing<Float>(minimumCapacity: 48_000 * 2 * 2, zero: 0)
-    private var inputRate: Double = 0
+    /// Capture rate: written once on the audio thread, read on `queue`.
+    private let inputRateBox = AtomicDouble(0)
+    private var inputRate: Double { inputRateBox.value }
+    /// For tests: the capture rate as seen from another thread.
+    var capturedSampleRate: Double { inputRateBox.value }
     private var converter: AVAudioConverter?
     private var inBuffer: AVAudioPCMBuffer?
     private var outBuffer: AVAudioPCMBuffer?
@@ -108,7 +112,7 @@ final class AirPlaySession: AudioSink {
     // MARK: AudioSink (real-time thread)
 
     func consume(_ stereo: UnsafePointer<Float>, frames: Int, sampleRate: Double) {
-        if inputRate == 0 { inputRate = sampleRate }
+        if inputRateBox.value == 0 { inputRateBox.value = sampleRate }   // only this thread writes it
         ring.write(stereo, count: frames * 2)   // lock-free, no allocation
     }
 

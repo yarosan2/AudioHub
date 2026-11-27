@@ -40,8 +40,10 @@ final class PCMStreamServer: AudioSink {
     private static let maxBlockSamples = 16_384 * 2
     private let produceScratch: UnsafeMutablePointer<Int16>   // RT thread only
     private let drainScratch: UnsafeMutablePointer<Int16>     // `queue` only
-    private(set) var sampleRate: Double = 0
-    private let rateKnown = DispatchSemaphore(value: 0)
+    /// Published once by the audio thread, read by the network queue and by callers waiting
+    /// for the format. Atomic: no locks or semaphores on the audio thread.
+    private let rate = AtomicDouble(0)
+    var sampleRate: Double { rate.value }
 
     private var statBytes = 0
     private var statPeak = 0
@@ -105,16 +107,19 @@ final class PCMStreamServer: AudioSink {
 
     /// Blocks until audio has started flowing (we need the sample rate for the WAV header).
     func waitForAudioFormat(timeout: TimeInterval) -> Bool {
-        if sampleRate > 0 { return true }
-        let ok = rateKnown.wait(timeout: .now() + timeout) == .success
-        if ok { rateKnown.signal() }
-        return ok
+        // Polls instead of a semaphore so the audio thread never has to signal anything.
+        let deadline = Date().addingTimeInterval(timeout)
+        while rate.value == 0 {
+            if Date() >= deadline { return false }
+            usleep(5_000)
+        }
+        return true
     }
 
     // MARK: AudioSink (real-time thread)
 
     func consume(_ stereo: UnsafePointer<Float>, frames: Int, sampleRate: Double) {
-        if self.sampleRate == 0 { self.sampleRate = sampleRate; rateKnown.signal() }
+        if rate.value == 0 { rate.value = sampleRate }   // only this thread writes it
         // No locks, no allocation: convert into preallocated scratch, then into the ring.
         let n = min(frames * 2, Self.maxBlockSamples)
         for i in 0 ..< n {
@@ -192,7 +197,8 @@ final class PCMStreamServer: AudioSink {
                 c.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in c.cancel() })
                 return
             }
-            response.append(Self.wavHeader(sampleRate: UInt32(self.sampleRate > 0 ? self.sampleRate : 48_000)))
+            let r = self.rate.value
+            response.append(Self.wavHeader(sampleRate: UInt32(r > 0 ? r : 48_000)))
             c.send(content: response, completion: .contentProcessed { _ in })
             self.clients[ObjectIdentifier(c)] = Client(c)
         }
