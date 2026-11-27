@@ -142,6 +142,34 @@ do {
     switch args.first {
     case "selftest":
         SelfTest.run(arguments: Array(args.dropFirst()))
+    case "update-keygen" where args.count > 1 && args[1] == "--rotate":
+        // Step 1 of a key rotation: create the successor key next to the active one.
+        guard SigningKeyStore.load() != nil else { print("No active key; run update-keygen first."); exit(1) }
+        let nextKey: Curve25519.Signing.PrivateKey
+        if let k = SigningKeyStore.load(SigningKeyStore.next) {
+            nextKey = k
+            print("A next key already exists.")
+        } else {
+            nextKey = Curve25519.Signing.PrivateKey()
+            try SigningKeyStore.save(nextKey, as: SigningKeyStore.next)
+            print("Created the next signing key in your login keychain.")
+        }
+        print("Put this public key into Info.plist as AHUpdatePublicKey for the transition release:")
+        print(SigningKeyStore.publicKey(of: nextKey))
+        print("That release is still signed with the current key, so installed copies accept it.")
+        print("After it is published: audiohub update-keygen --finish-rotation")
+    case "update-keygen" where args.count > 1 && args[1] == "--finish-rotation":
+        // Step 2: the next key becomes the active one; the old key is deleted.
+        guard let nextKey = SigningKeyStore.load(SigningKeyStore.next) else { print("No next key to promote."); exit(1) }
+        try SigningKeyStore.delete(SigningKeyStore.active)
+        try SigningKeyStore.save(nextKey, as: SigningKeyStore.active)
+        guard SigningKeyStore.load().map(SigningKeyStore.publicKey) == SigningKeyStore.publicKey(of: nextKey) else {
+            print("Could not verify the promoted key; the next key is kept."); exit(1)
+        }
+        try SigningKeyStore.delete(SigningKeyStore.next)
+        print("Rotation finished. Active public key: \(SigningKeyStore.publicKey(of: nextKey))")
+        print("The old key was deleted. Back up the new one from a separate Terminal window:")
+        print("  security find-generic-password -s \"\(SigningKeyStore.service)\" -a \(SigningKeyStore.active) -w")
     case "update-keygen":
         // Creates the release signing key (once) and prints the public key for Info.plist.
         if let existing = SigningKeyStore.load() {
@@ -162,13 +190,22 @@ do {
         let url = URL(fileURLWithPath: args[1])
         let data = try Data(contentsOf: url)
         let sig = try UpdateSignature.sign(data, with: key)
-        guard let embedded = UpdateConfig.publicKey,
-              UpdateSignature.verify(data, signature: sig, publicKey: embedded) else {
-            print("The key in the keychain does not match AHUpdatePublicKey in this build's Info.plist.")
+        let activePub = SigningKeyStore.publicKey(of: key)
+        let nextPub = SigningKeyStore.load(SigningKeyStore.next).map(SigningKeyStore.publicKey)
+        guard UpdateSignature.verify(data, signature: sig, publicKey: activePub) else { print("Self-check failed."); exit(1) }
+        switch SigningKeyStore.plan(embedded: UpdateConfig.publicKey ?? "", activeKey: activePub, nextKey: nextPub) {
+        case .normal:
+            print("Signed with the current key (matches AHUpdatePublicKey).")
+        case .transition:
+            print("TRANSITION RELEASE: signed with the current key, ships the next key in Info.plist.")
+            print("After publishing it, run: audiohub update-keygen --finish-rotation")
+        case .mismatch:
+            print("AHUpdatePublicKey in this build is neither the current nor the next key; installed copies")
+            print("could never verify releases after it. Not signing.")
             exit(1)
         }
         try (sig + "\n").write(to: url.appendingPathExtension("sig"), atomically: true, encoding: .utf8)
-        print("wrote \(url.lastPathComponent).sig (verified against the embedded public key)")
+        print("wrote \(url.lastPathComponent).sig")
     case "check-update":
         let sem = DispatchSemaphore(value: 0)
         Task { @MainActor in

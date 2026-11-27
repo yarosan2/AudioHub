@@ -167,6 +167,21 @@ Builds a release build, runs the self-test, writes `build/AudioHub-<version>.zip
 in the keychain (`audiohub update-keygen` creates it once and prints the public key for
 `AHUpdatePublicKey`) and the *AudioHub Local Signing* certificate.
 
+### Rotating the release key
+
+Installed copies trust only the key embedded in them, so a new key is introduced through a
+*transition release* that is signed with the current key but carries the new one:
+
+```bash
+build/AudioHub.app/Contents/MacOS/audiohub update-keygen --rotate   # prints the new public key
+# put it into Info.plist as AHUpdatePublicKey, bump the version, commit
+scripts/release.sh <version>        # signs with the current key, reports "TRANSITION RELEASE"
+# publish that release, then:
+build/AudioHub.app/Contents/MacOS/audiohub update-keygen --finish-rotation   # new key active, old deleted
+```
+
+Back up the key only from a separate Terminal window, never paste it anywhere.
+
 ```bash
 ./build.sh                                          # build build/AudioHub.app
 build/AudioHub.app/Contents/MacOS/audiohub selftest # automated checks, no speakers needed

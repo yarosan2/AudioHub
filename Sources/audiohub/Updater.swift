@@ -105,11 +105,17 @@ enum UpdateSignature {
 }
 
 /// The maintainer's private signing key, kept in the login keychain (never in the repository).
+///
+/// Key rotation keeps installed copies updatable: `active` is the key installed apps trust;
+/// `next` is its successor. A *transition release* ships the next public key in Info.plist but
+/// is signed with the active key, so current installs accept it. After it is out,
+/// `update-keygen --finish-rotation` makes the next key active and deletes the old one.
 enum SigningKeyStore {
     static let service = "AudioHub update signing key"
-    static let account = "ed25519"
+    static let active = "ed25519"
+    static let next = "ed25519-next"
 
-    static func load() -> Curve25519.Signing.PrivateKey? {
+    static func load(_ account: String = active) -> Curve25519.Signing.PrivateKey? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service, kSecAttrAccount as String: account,
                                 kSecReturnData as String: true]
@@ -118,13 +124,35 @@ enum SigningKeyStore {
         return try? Curve25519.Signing.PrivateKey(rawRepresentation: data)
     }
 
-    static func save(_ key: Curve25519.Signing.PrivateKey) throws {
+    static func save(_ key: Curve25519.Signing.PrivateKey, as account: String = active) throws {
         let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                    kSecAttrService as String: service, kSecAttrAccount as String: account,
-                                   kSecAttrLabel as String: service,
+                                   kSecAttrLabel as String: account == active ? service : service + " (next)",
                                    kSecValueData as String: key.rawRepresentation]
         let status = SecItemAdd(item as CFDictionary, nil)
         guard status == errSecSuccess else { throw UserError("Keychain error \(status)") }
+    }
+
+    static func delete(_ account: String) throws {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: service, kSecAttrAccount as String: account]
+        let status = SecItemDelete(q as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw UserError("Keychain error \(status)") }
+    }
+
+    static func publicKey(of key: Curve25519.Signing.PrivateKey) -> String {
+        key.publicKey.rawRepresentation.base64EncodedString()
+    }
+
+    enum SigningPlan: Equatable { case normal, transition, mismatch }
+
+    /// Which kind of release a build is, given the public key embedded in it.
+    /// Signing always uses the active key; the embedded key may be the active one (normal)
+    /// or its successor (transition release). Anything else would brick updates.
+    static func plan(embedded: String, activeKey: String, nextKey: String?) -> SigningPlan {
+        if embedded == activeKey { return .normal }
+        if let nextKey, embedded == nextKey { return .transition }
+        return .mismatch
     }
 }
 

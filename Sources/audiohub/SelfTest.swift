@@ -501,13 +501,17 @@ enum SelfTest {
         let current = AppVersion.current
 
         /// A copy of this build with another version, signed with `identity` (cert hash or "-"), zipped.
-        func makeArchive(version: String, identity: String) -> Data? {
+        func makeArchive(version: String, identity: String, embeddedKey: String? = nil) -> Data? {
             let dir = root.appendingPathComponent("src-\(UUID().uuidString)")
             let app = dir.appendingPathComponent("AudioHub.app")
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             guard (try? fm.copyItem(at: Bundle.main.bundleURL, to: app)) != nil else { return nil }
             _ = shell("/usr/bin/plutil", ["-replace", "CFBundleShortVersionString", "-string", version,
                                           app.appendingPathComponent("Contents/Info.plist").path])
+            if let embeddedKey {
+                _ = shell("/usr/bin/plutil", ["-replace", "AHUpdatePublicKey", "-string", embeddedKey,
+                                              app.appendingPathComponent("Contents/Info.plist").path])
+            }
             _ = shell("/usr/bin/codesign", ["-s", identity, "-i", "local.audiohub", "-f", app.path])
             let zip = dir.appendingPathComponent("a.zip")
             _ = shell("/usr/bin/ditto", ["-c", "-k", "--keepParent", app.path, zip.path])
@@ -540,7 +544,8 @@ enum SelfTest {
         defer { UpdateConfig.apiBaseOverride = nil }
 
         /// Publishes `zip` as release `version` with `signature`, then runs the installer on a fresh copy.
-        func attempt(_ name: String, version: String, zip: Data, signature: String, advertisedSize: Int? = nil)
+        func attempt(_ name: String, version: String, zip: Data, signature: String, advertisedSize: Int? = nil,
+                     into existing: URL? = nil, trusting trustedKey: String? = nil)
             -> (result: Result<Void, Error>, target: URL) {
             let base = "http://127.0.0.1:\(server.port)"
             server.routes = [
@@ -554,7 +559,8 @@ enum SelfTest {
                 "/dl/AudioHub-\(version).zip": zip,
                 "/dl/AudioHub-\(version).zip.sig": Data(signature.utf8),
             ]
-            let target = freshTarget()
+            let target = existing ?? freshTarget()
+            let pub = trustedKey ?? pub
             let result: Result<Void, Error> = blocking {
                 let data = try await UpdateInstaller.fetch(
                     UpdateConfig.apiBase.appendingPathComponent("repos/test/app/releases/latest"), limit: 1_000_000)
@@ -584,6 +590,43 @@ enum SelfTest {
         refused("not newer than installed", attempt("same", version: current, zip: same, signature: sign(same)))
         refused("size differs from the release", attempt("size", version: "99.0.0", zip: good, signature: sign(good),
                                                          advertisedSize: good.count + 1))
+
+        // Key rotation: installed copy trusts A. Transition release is signed with A but ships B.
+        let keyB = Curve25519.Signing.PrivateKey()
+        let pubB = keyB.publicKey.rawRepresentation.base64EncodedString()
+        guard let transition = makeArchive(version: "99.0.0", identity: cert, embeddedKey: pubB),
+              let afterRotation = makeArchive(version: "100.0.0", identity: cert, embeddedKey: pubB) else {
+            check("rotation: archives built", false); return
+        }
+        let step1 = attempt("transition", version: "99.0.0", zip: transition, signature: sign(transition))
+        func embeddedKey(_ app: URL) -> String? {
+            let d = try? Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+            let p = d.flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+            return p?["AHUpdatePublicKey"] as? String
+        }
+        check("rotation: transition release (signed with old key, ships new key) installs",
+              (try? step1.result.get()) != nil && embeddedKey(step1.target) == pubB)
+        // The updated copy now trusts whatever key it carries: B.
+        let trusted = embeddedKey(step1.target) ?? ""
+        let oldSigned = attempt("old key after rotation", version: "100.0.0", zip: afterRotation,
+                                signature: sign(afterRotation), into: step1.target, trusting: trusted)
+        var oldRefused = false
+        if case .failure(let e) = oldSigned.result { oldRefused = true; print("      reason: \(e)") }
+        check("rotation: after it, a release signed with the old key is refused",
+              oldRefused && version(of: step1.target) == "99.0.0")
+        let newSigned = attempt("new key", version: "100.0.0", zip: afterRotation,
+                                signature: (try? UpdateSignature.sign(afterRotation, with: keyB)) ?? "",
+                                into: step1.target, trusting: trusted)
+        check("rotation: and a release signed with the new key installs",
+              (try? newSigned.result.get()) != nil && version(of: step1.target) == "100.0.0")
+
+        check("rotation plan: build with the active key → normal",
+              SigningKeyStore.plan(embedded: pub, activeKey: pub, nextKey: pubB) == .normal)
+        check("rotation plan: build with the next key → transition",
+              SigningKeyStore.plan(embedded: pubB, activeKey: pub, nextKey: pubB) == .transition)
+        check("rotation plan: unknown key → refuse to sign",
+              SigningKeyStore.plan(embedded: "AAAA", activeKey: pub, nextKey: pubB) == .mismatch
+              && SigningKeyStore.plan(embedded: pubB, activeKey: pub, nextKey: nil) == .mismatch)
     }
 
     static func signingCertificateHash() -> String? {
