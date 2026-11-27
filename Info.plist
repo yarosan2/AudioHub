@@ -14,12 +14,12 @@
     <key>CFBundleDisplayName</key><string>AudioHub</string>
     <key>CFBundleExecutable</key><string>audiohub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.1</string>
-    <key>CFBundleVersion</key><string>3</string>
+    <key>CFBundleShortVersionString</key><string>0.2.2</string>
+    <key>CFBundleVersion</key><string>4</string>
     <key>LSMinimumSystemVersion</key><string>14.2</string>
     <key>LSUIElement</key><true/>
     <key>AHUpdateRepository</key><string>yarosan2/AudioHub</string>
-    <key>AHUpdatePublicKey</key><string>zH7YCoZ2pct/a66PwEQC4/kjz/eE+VRrGs3tC51fiPk=</string>
+    <key>AHUpdatePublicKey</key><string>CtbEjXHNk/RRlA3M2qtaI9ulRTGVgYg6rWH5nVg/4RQ=</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>AudioHub captures the sound of the apps you choose to send it to other speakers.</string>
     <key>NSLocalNetworkUsageDescription</key>
