@@ -41,6 +41,10 @@ cd AudioHub
 scripts/make-signing-cert.sh   # once, see "Permissions" below
 scripts/install.sh             # builds and copies AudioHub to /Applications
 ```
+
+`install.sh` keeps the kind of build that is already installed: a release build (from GitHub
+or the in-app updater) stays a release build so one-click updates keep working. Override with
+`--release` or `--source`. It refuses to replace a newer installed version unless `--force`.
 Or download the latest release.
 
 On first use macOS asks for two permissions:
