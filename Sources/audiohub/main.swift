@@ -135,6 +135,8 @@ var _sources: [DispatchSourceProtocol] = []
 let args = Array(CommandLine.arguments.dropFirst())
 do {
     switch args.first {
+    case "selftest":
+        SelfTest.run()
     case "list":
         try list()
     case "speakers", "cast-list":

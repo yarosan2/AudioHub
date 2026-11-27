@@ -65,8 +65,10 @@ final class AirPlaySession: AudioSink {
     private var localIP = "", remoteIP = "", interfaceName: String?
     private var announceURL: String { "rtsp://\(localIP)/\(sessionID)" }
 
-    // UDP
-    private var audioSock: Int32 = -1, controlSock: Int32 = -1, timingSock: Int32 = -1
+    // UDP. Audio and control packets share `controlSock` (RAOP allows any source port), so it
+    // has exactly one owner and is closed once, in stop(). `timingSock` is owned by
+    // `timingSource` and closed by its cancel handler.
+    private var controlSock: Int32 = -1, timingSock: Int32 = -1
     private var serverAudioPort: UInt16 = 0, serverControlPort: UInt16 = 0
     private var timingSource: DispatchSourceRead?
     private var syncTimer: DispatchSourceTimer?
@@ -144,8 +146,9 @@ final class AirPlaySession: AudioSink {
             if streaming { _ = try? request("TEARDOWN", announceURL, timeout: 1) }
             streaming = false
             rtsp?.cancel()
-            for s in [audioSock, controlSock] where s >= 0 { close(s) }
-            audioSock = -1; controlSock = -1
+            if controlSock >= 0 { close(controlSock); controlSock = -1 }
+            if timingSource == nil, timingSock >= 0 { close(timingSock) }  // never handed to the source
+            timingSock = -1
         }
     }
 
@@ -180,7 +183,6 @@ final class AirPlaySession: AudioSink {
     private func handshake() throws {
         controlSock = try Self.udpSocket(interface: interfaceName)
         timingSock = try Self.udpSocket(interface: interfaceName)
-        audioSock = controlSock  // audio may go out of any socket; reuse control
         listenForTiming()
 
         _ = try request("OPTIONS", "*")
@@ -308,7 +310,7 @@ final class AirPlaySession: AudioSink {
         pkt.append(firstPacket ? 0xE0 : 0x60)
         pkt.appendBE(seq); pkt.appendBE(rtpTime); pkt.appendBE(ssrc)
         pkt.append(Self.alacUncompressed(samples))
-        if Self.sendUDP(audioSock, pkt, to: remoteIP, port: serverAudioPort) < 0 { statSendErrors += 1 }
+        if Self.sendUDP(controlSock, pkt, to: remoteIP, port: serverAudioPort) < 0 { statSendErrors += 1 }
         statPackets += 1
         for v in samples { statPeak = max(statPeak, v == .min ? .max : abs(v)) }
         firstPacket = false
