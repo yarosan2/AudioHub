@@ -143,6 +143,7 @@ final class PCMStreamServer: AudioSink {
                 else { self.reply(c, status: 400) }
                 return
             }
+            Self.dumpIfRequested(buf)
             let request = String(decoding: buf, as: UTF8.self)
             let remote: String
             if case .hostPort(let host, _) = c.endpoint { remote = "\(host)" } else { remote = "" }
@@ -185,6 +186,14 @@ final class PCMStreamServer: AudioSink {
         if s.hasPrefix("[") && s.hasSuffix("]") { s = String(s.dropFirst().dropLast()) }
         if s.lowercased().hasPrefix("::ffff:"), s.contains(".") { s = String(s.dropFirst(7)) }
         return s
+    }
+
+    /// Debug: AUDIOHUB_DUMP_HTTP_DIR=<dir> saves every incoming request byte for byte
+    /// (used to record test fixtures from real speakers).
+    private static func dumpIfRequested(_ raw: Data) {
+        guard let dir = ProcessInfo.processInfo.environment["AUDIOHUB_DUMP_HTTP_DIR"] else { return }
+        let name = "request-\(Int(Date().timeIntervalSince1970 * 1000)).http"
+        try? raw.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
 
     /// Keeps the token out of logs.

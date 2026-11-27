@@ -7,17 +7,28 @@
 build/AudioHub.app/Contents/MacOS/audiohub selftest
 ```
 
-No speakers or permissions needed. Covers:
+No speakers or permissions needed. Run it from the repository root (it reads
+`Tests/Fixtures/`), or pass `--fixtures <dir>`. A missing fixture fails the run. Covers:
 
 | Area | What is checked |
 | --- | --- |
 | Lock-free ring | overflow, wrap-around, 20 M values across two threads arrive complete and in order |
 | HTTP stream server | request validation (token path, method, client IP, malformed); a live loopback server: 403 before the speaker is known, 200 + WAV header for it, 404/403 otherwise, oversized requests, refusal after stop |
+| Recorded fixtures | `Tests/Fixtures/chromecast-get.http` — the exact request a real Chromecast sends — must stay intact, pass validation, and get 200 + WAV from a live server (see `Tests/Fixtures/README.md`) |
 | Cast framing | frames split/merged across reads, 64 KiB limit, oversized length rejected from the header alone |
 | RTSP | parser (binary bodies, partial bodies); a scripted fake server: split responses, out-of-order replies to concurrent requests, a late reply after a timeout, peer close, non-200 |
 | AirPlay resend | ranges across the 16-bit sequence wrap, reply format, too-old packets, capped counts |
 | Stereo delay | sample-exact delay, click-free delay changes (with a control run proving the check detects a jump), rapid changes |
 | ALAC | uncompressed frame layout and round-trip |
+
+### Recording a fixture from a real device
+
+```bash
+AUDIOHUB_DUMP_HTTP_DIR=/tmp/http ./run.sh route <app>=cast:<speaker> --seconds 10
+```
+
+Every incoming request is saved byte for byte; anonymize it as described in
+`Tests/Fixtures/README.md` before committing.
 
 ### Under ThreadSanitizer
 

@@ -140,7 +140,7 @@ let args = Array(CommandLine.arguments.dropFirst())
 do {
     switch args.first {
     case "selftest":
-        SelfTest.run()
+        SelfTest.run(arguments: Array(args.dropFirst()))
     case "list":
         try list()
     case "speakers", "cast-list":

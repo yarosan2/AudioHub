@@ -1,0 +1,10 @@
+GET /0123456789abcdef0123456789abcdef/stream.wav HTTP/1.1
+Host: 192.0.2.10:55575
+Connection: keep-alive
+User-Agent: Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.121 Safari/537.36 CrKey/1.52.272222
+Range: bytes=0-
+Accept-Encoding: identity;q=1, *;q=0
+Accept: */*
+CAST-DEVICE-CAPABILITIES: {"audio_assistant":true,"bluetooth_supported":true,"display_supported":false,"hi_res_audio_supported":true,"remote_control_input_supported":false,"touch_input_supported":false}
+Accept-Language: en-US,en;q=0.9
+

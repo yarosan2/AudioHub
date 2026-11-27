@@ -16,7 +16,12 @@ enum SelfTest {
         }
     }
 
-    static func run() -> Never {
+    /// Where recorded fixtures live; `selftest --fixtures <dir>` overrides (default: Tests/Fixtures,
+    /// relative to the current directory, i.e. run it from the repository root).
+    static var fixturesDir = "Tests/Fixtures"
+
+    static func run(arguments: [String] = []) -> Never {
+        if let i = arguments.firstIndex(of: "--fixtures"), i + 1 < arguments.count { fixturesDir = arguments[i + 1] }
         ringBuffer()
         ringBufferStress()
         alacFraming()
@@ -24,6 +29,7 @@ enum SelfTest {
         stereoDelay()
         httpValidation()
         httpServerLive()
+        chromecastFixture()
         castFraming()
         rtspParsing()
         rtspLive()
@@ -113,6 +119,38 @@ enum SelfTest {
         check("HTTP IPv4-mapped / scoped address normalized",
               v("GET \(p) HTTP/1.1\r\n\r\n", ip: "::ffff:192.168.1.6") == 200
               && v("GET \(p) HTTP/1.1\r\n\r\n", ip: "192.168.1.6%en0") == 200)
+    }
+
+    /// The request a real Chromecast sent (Tests/Fixtures/chromecast-get.http). It must always be
+    /// accepted: a parser bug once rejected every request that had headers, and hand-written
+    /// test requests without headers did not notice.
+    static func chromecastFixture() {
+        let url = URL(fileURLWithPath: fixturesDir).appendingPathComponent("chromecast-get.http")
+        guard let raw = try? Data(contentsOf: url) else {
+            // A missing fixture is a failure, never a skip: otherwise the regression could return unnoticed.
+            check("fixture: chromecast-get.http present", false, "not found at \(url.path); run from the repo root or pass --fixtures <dir>")
+            return
+        }
+        let text = String(decoding: raw, as: UTF8.self)
+        let lines = text.components(separatedBy: "\r\n")
+        check("fixture: intact (CRLF endings, 8 headers, blank line)",
+              raw.suffix(4) == Data("\r\n\r\n".utf8) && lines.count == 11
+              && !text.replacingOccurrences(of: "\r\n", with: "").contains("\n")
+              && text.contains("CAST-DEVICE-CAPABILITIES:"))
+        let path = "/0123456789abcdef0123456789abcdef/stream.wav"
+        check("fixture: real Chromecast request passes validation",
+              PCMStreamServer.validate(request: text, remoteIP: "192.0.2.6", allowedIP: "192.0.2.6", path: path) == 200)
+        check("fixture: same request from another host is refused",
+              PCMStreamServer.validate(request: text, remoteIP: "192.0.2.7", allowedIP: "192.0.2.6", path: path) == 403)
+
+        // Through the real server, bytes as recorded (only the per-route token swapped in).
+        guard let server = try? PCMStreamServer() else { check("fixture: server starts", false); return }
+        defer { server.stop() }
+        server.allow(client: "127.0.0.1")
+        let live = text.replacingOccurrences(of: path, with: server.path)
+        let reply = String(decoding: TCPClient.exchange(port: server.port, live, readBytes: 200), as: UTF8.self)
+        check("fixture: real Chromecast request gets 200 + WAV from the live server",
+              reply.hasPrefix("HTTP/1.1 200") && reply.contains("RIFF"))
     }
 
     /// Starts a real server on this Mac and talks to it over TCP.
