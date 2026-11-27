@@ -161,15 +161,23 @@ AudioHub only talks to devices on your local network.
 
 ### Releasing
 
+One command, from a clean `main`:
+
 ```bash
-# bump CFBundleShortVersionString in Info.plist, commit, then:
-scripts/release.sh 0.2.1
+scripts/release.sh 0.3.1                    # leaves a draft release on GitHub to review
+scripts/release.sh 0.3.1 --notes notes.md   # with a description
+scripts/release.sh 0.3.1 --publish          # publish right away
+scripts/release.sh 0.3.1 --no-github        # only build and sign; nothing is pushed
 ```
 
-Builds a release build, runs the self-test, writes `build/AudioHub-<version>.zip` and its
-`.zip.sig`. Attach both to a GitHub release tagged `v<version>`. Signing needs the release key
-in the keychain (`audiohub update-keygen` creates it once and prints the public key for
-`AHUpdatePublicKey`) and the *AudioHub Local Signing* certificate.
+It checks that the tree is clean, you are on `main`, not behind `origin` and the tag is
+unused; sets the version in `Info.plist` and commits it; makes a release build, runs the
+self-test, zips and signs it; then pushes `main` and the tag `v<version>`, which points at the
+exact commit the zip was built from. With the GitHub CLI installed and logged in
+(`gh auth login`), it also creates the release with `AudioHub-<version>.zip` and its `.zip.sig`;
+otherwise it prints what to upload. Signing needs the release key in the keychain
+(`audiohub update-keygen` creates it once and prints the public key for `AHUpdatePublicKey`)
+and the *AudioHub Local Signing* certificate.
 
 ### Rotating the release key
 
