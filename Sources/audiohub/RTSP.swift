@@ -119,9 +119,9 @@ final class RTSPClient {
                 overflow = true
             case .response(let r, let consumed):
                 buffer.removeFirst(consumed)
-                // Match by CSeq; a response without one goes to the oldest waiting request.
-                let key = r.cseq ?? pending.keys.min()
-                if let key, let p = pending.removeValue(forKey: key) {
+                // Match strictly by CSeq. A response without one (RTSP requires it) cannot be
+                // attributed to any request, so it is reported as unmatched, never guessed.
+                if let key = r.cseq, let p = pending.removeValue(forKey: key) {
                     p.result = .success(r)
                     delivered.append((p, r))
                 } else {

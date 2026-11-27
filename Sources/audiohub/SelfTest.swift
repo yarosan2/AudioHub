@@ -465,7 +465,29 @@ enum SelfTest {
             check("RTSP live: requests after close fail", after)
         }
 
-        // 5. Non-200 status is reported as an error.
+        // 5. A response without CSeq is not given to whichever request happens to wait.
+        withRTSP({ conn in
+            _ = conn.readRequest()
+            conn.write("RTSP/1.0 200 OK\r\nX-For: nobody\r\n\r\n")       // no CSeq
+            let second = conn.readRequest()
+            conn.write("RTSP/1.0 200 OK\r\nCSeq: \(second)\r\nX-For: second\r\n\r\n")
+        }) { client in
+            var unmatched: [String] = []
+            client.onLateResponse = { unmatched.append($0.headers["x-for"] ?? "?") }
+            var first: RTSPClient.Response?
+            var firstTimedOut = false
+            do { first = try client.request("OPTIONS", "*", timeout: 0.5) } catch let e as RTSPClient.RTSPError {
+                if case .timeout = e { firstTimedOut = true }
+            } catch {}
+            let second = try? client.request("OPTIONS", "*", timeout: 2)
+            usleep(50_000)
+            check("RTSP live: response without CSeq is not matched to a waiting request",
+                  first == nil && firstTimedOut && unmatched == ["nobody"],
+                  "got \(first?.headers["x-for"] ?? "nil"), unmatched \(unmatched)")
+            check("RTSP live: later responses with CSeq still match", second?.headers["x-for"] == "second")
+        }
+
+        // 6. Non-200 status is reported as an error.
         withRTSP({ conn in
             let c = conn.readRequest()
             conn.write("RTSP/1.0 403 Forbidden\r\nCSeq: \(c)\r\n\r\n")
