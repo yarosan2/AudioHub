@@ -45,11 +45,13 @@ DYLD_LIBRARY_PATH="$RT" build/AudioHub.app/Contents/MacOS/audiohub selftest
 ./build.sh   # rebuild normally afterwards
 ```
 
-A clean run counts only if the canary was reported. With mismatched Command Line Tools
-(Swift/clang 17 compiler, clang 21 sanitizer runtime) TSan starts but misses even trivial
-races — a plain C data race goes unreported — so a run without warnings there is
-inconclusive. Thread-safety of the audio path is therefore designed in (lock-free ring, atomic
-hand-offs via `CAtomics`) rather than inferred from TSan output.
+A clean run counts only if the canary was reported. Even then, treat it as one signal, not a
+proof. On the development machine (mismatched Command Line Tools: Swift/clang 17 compiler,
+clang 21 sanitizer runtime) TSan reports the canary and did catch the old sample-rate race
+(audio thread vs. `readRequest`), but it missed obvious races in small standalone C and Swift
+programs and did not flag the same old race through the dedicated hand-off check.
+Thread-safety of the audio path is therefore designed in (lock-free ring, atomic hand-offs via
+`CAtomics`) rather than inferred from TSan output.
 
 ## Manual checks with real speakers
 
