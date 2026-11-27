@@ -39,6 +39,7 @@ final class Running {
         routes.forEach { $0.stop() }
         casts.forEach { $0.stop() }
         airplays.forEach { $0.stop() }
+        servers.forEach { $0.stop() }
     }
 }
 let running = Running()
@@ -93,7 +94,10 @@ func buildRoute(app: String, dest: String) throws {
         let session = CastSession(device: dev)
         session.onStatus = { log("[\(dev.name)] \($0)") }
         let port = server.port, path = server.path
-        session.play { ip in "http://\(ip):\(port)\(path)" }
+        session.play { ip, speaker in
+            server.allow(client: speaker)
+            return "http://\(ip):\(port)\(path)"
+        }
         running.routes.append(route); running.servers.append(server); running.casts.append(session)
         print("\(appName) → Chromecast \(dev.name) (\(dev.model)), stream on port \(port)")
     } else {

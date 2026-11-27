@@ -383,10 +383,13 @@ final class Engine: ObservableObject {
             report(L("connecting to “%@”…", name))
             DispatchQueue.global().async {
                 guard server.waitForAudioFormat(timeout: 10) else { report(L("no audio from the app")); return }
-                session.play { ip in "http://\(ip):\(server.port)\(server.path)" }
+                session.play { ip, speaker in
+                    server.allow(client: speaker)
+                    return "http://\(ip):\(server.port)\(server.path)"
+                }
             }
-            return NetworkSink(sink: server, stop: { [server] in
-                _ = server  // keep the HTTP server alive as long as the route
+            return NetworkSink(sink: server, stop: {
+                server.stop()
                 DispatchQueue.global().async { session.stop() }
             }, setVolume: { session.setVolume($0) })
         }

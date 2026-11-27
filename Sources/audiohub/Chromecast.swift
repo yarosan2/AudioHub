@@ -59,7 +59,8 @@ final class CastSession {
     private var requestID = 1
     private var transportID: String?
     private var sessionID: String?
-    private var mediaURL: ((String) -> String)?
+    /// Builds the media URL from (our LAN IP, the speaker's IP).
+    private var mediaURL: ((String, String) -> String)?
     private var heartbeat: DispatchSourceTimer?
     var onStatus: ((String) -> Void)?
     /// Speaker volume 0…1 as reported by the device (also after changes made on the speaker itself).
@@ -69,7 +70,7 @@ final class CastSession {
 
     /// Connects and plays `url(localIP)`. The closure receives the Mac's LAN IP as seen on the
     /// path to the speaker, so the URL is reachable from it.
-    func play(url: @escaping (String) -> String) {
+    func play(url: @escaping (_ localIP: String, _ speakerIP: String) -> String) {
         mediaURL = url
         queue.async { self.connect(pathIndex: 0) }
     }
@@ -141,8 +142,11 @@ final class CastSession {
         heartbeat = t
     }
 
-    private var localIP: String? {
-        guard case .hostPort(let host, _)? = connection?.currentPath?.localEndpoint else { return nil }
+    private var localIP: String? { Self.ip(connection?.currentPath?.localEndpoint) }
+    private var remoteIP: String? { Self.ip(connection?.currentPath?.remoteEndpoint) }
+
+    private static func ip(_ endpoint: NWEndpoint?) -> String? {
+        guard case .hostPort(let host, _)? = endpoint else { return nil }
         switch host {
         case .ipv4(let a): return "\(a)"
         case .ipv6(let a): return "[\(a)]"
@@ -168,8 +172,10 @@ final class CastSession {
             transportID = tid
             sessionID = app["sessionId"] as? String
             send(NS.connection, ["type": "CONNECT"], to: tid)
-            guard let ip = localIP, let url = mediaURL?(ip) else { onStatus?("cannot determine local IP"); return }
-            onStatus?("loading \(url)")
+            guard let ip = localIP, let speaker = remoteIP, let url = mediaURL?(ip, speaker) else {
+                onStatus?("cannot determine local IP"); return
+            }
+            onStatus?("loading \(url.replacingOccurrences(of: #"/[0-9a-f]{32}/"#, with: "/…/", options: .regularExpression))")
             send(NS.media, [
                 "type": "LOAD", "requestId": nextID(), "autoplay": true, "currentTime": 0,
                 "media": [
