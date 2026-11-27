@@ -57,8 +57,7 @@ final class AirPlaySession: AudioSink {
     private let queue = DispatchQueue(label: "audiohub.raop")
     // Separate queue: the speaker asks for our time while we block waiting for SETUP's reply.
     private let timingQueue = DispatchQueue(label: "audiohub.raop.timing", qos: .userInteractive)
-    private var rtsp: NWConnection?
-    private var cseq = 0
+    private var rtsp: RTSPClient?
     private var sessionHeader: String?
     private let sessionID = UInt32.random(in: 1 ... .max)
     private let clientInstance = String(format: "%016llX", UInt64.random(in: 1 ... .max))
@@ -145,7 +144,7 @@ final class AirPlaySession: AudioSink {
             timingSource?.cancel()
             if streaming { _ = try? request("TEARDOWN", announceURL, timeout: 1) }
             streaming = false
-            rtsp?.cancel()
+            rtsp?.close()
             if controlSock >= 0 { close(controlSock); controlSock = -1 }
             if timingSource == nil, timingSock >= 0 { close(timingSock) }  // never handed to the source
             timingSock = -1
@@ -168,7 +167,8 @@ final class AirPlaySession: AudioSink {
             connect(pathIndex: pathIndex + 1)
             return
         }
-        rtsp = c
+        rtsp = RTSPClient(connection: c)
+        rtsp?.onLateResponse = { r in log("RTSP: dropped late response (CSeq \(r.cseq.map(String.init) ?? "?"))") }
         interfaceName = path.interface?.name
         if case .hostPort(let h, _)? = c.currentPath?.localEndpoint { localIP = Self.ipString(h) }
         if case .hostPort(let h, _)? = c.currentPath?.remoteEndpoint { remoteIP = Self.ipString(h) }
@@ -218,7 +218,7 @@ final class AirPlaySession: AudioSink {
         func param(_ key: String) -> UInt16? {
             transport.split(separator: ";").first { $0.hasPrefix(key + "=") }.flatMap { UInt16($0.dropFirst(key.count + 1)) }
         }
-        guard let sp = param("server_port") else { throw RTSPError.protocolError("no server_port in \(transport)") }
+        guard let sp = param("server_port") else { throw RTSPClient.RTSPError.protocolError("no server_port in \(transport)") }
         serverAudioPort = sp
         serverControlPort = param("control_port") ?? sp + 1
 
@@ -381,67 +381,27 @@ final class AirPlaySession: AudioSink {
 
     // MARK: RTSP
 
-    enum RTSPError: Error { case timeout(String), status(Int, String), protocolError(String) }
-    struct Response { let status: Int; let headers: [String: String] }
-
+    /// Adds the headers every RAOP request carries and hands it to the RTSP client.
     @discardableResult
     private func request(_ method: String, _ url: String, headers: [String: String] = [:],
-                         body: String? = nil, bodyData rawBody: Data? = nil, timeout: TimeInterval = 5) throws -> Response {
-        guard let rtsp else { throw RTSPError.protocolError("not connected") }
-        cseq += 1
+                         body: String? = nil, bodyData rawBody: Data? = nil,
+                         timeout: TimeInterval = 5) throws -> RTSPClient.Response {
+        guard let rtsp else { throw RTSPClient.RTSPError.closed }
         var h = headers
-        h["CSeq"] = "\(cseq)"
         h["User-Agent"] = "iTunes/7.6.2 (Windows; N;)"
         h["Client-Instance"] = clientInstance
         h["DACP-ID"] = clientInstance
         h["Active-Remote"] = "\(sessionID)"
         if let sessionHeader { h["Session"] = sessionHeader }
-        let bodyData = rawBody ?? body.map { Data($0.utf8) } ?? Data()
-        if !bodyData.isEmpty { h["Content-Length"] = "\(bodyData.count)" }
-        var msg = "\(method) \(url) RTSP/1.0\r\n"
-        for (k, v) in h { msg += "\(k): \(v)\r\n" }
-        msg += "\r\n"
-        var out = Data(msg.utf8); out.append(bodyData)
-
-        let done = DispatchSemaphore(value: 0)
-        var received = Data()
-        var result: Response?
-        rtsp.send(content: out, completion: .contentProcessed { _ in })
-        func readMore() {
-            rtsp.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { data, _, _, err in
-                if let data { received.append(data) }
-                if let r = Self.parseResponse(received) { result = r; done.signal() }
-                else if err == nil { readMore() } else { done.signal() }
-            }
-        }
-        readMore()
-        guard done.wait(timeout: .now() + timeout) == .success, let r = result else { throw RTSPError.timeout(method) }
-        if ProcessInfo.processInfo.environment["AUDIOHUB_DEBUG"] != nil { log("RTSP \(method) → \(r.status) \(r.headers)") }
-        guard r.status == 200 else { throw RTSPError.status(r.status, method) }
-        return r
-    }
-
-    private static func parseResponse(_ d: Data) -> Response? {
-        // Headers are text, the body may be binary (auth-setup), so split on bytes.
-        guard let end = d.range(of: Data("\r\n\r\n".utf8)),
-              let head = String(data: d[d.startIndex ..< end.lowerBound], encoding: .utf8) else { return nil }
-        var lines = head.components(separatedBy: "\r\n")
-        let statusLine = lines.removeFirst().split(separator: " ")
-        guard statusLine.count >= 2, let code = Int(statusLine[1]) else { return nil }
-        var headers: [String: String] = [:]
-        for l in lines {
-            guard let c = l.firstIndex(of: ":") else { continue }
-            headers[l[..<c].lowercased()] = l[l.index(after: c)...].trimmingCharacters(in: .whitespaces)
-        }
-        if let len = headers["content-length"].flatMap(Int.init), d.endIndex - end.upperBound < len { return nil }
-        return Response(status: code, headers: headers)
+        return try rtsp.request(method, url, headers: h,
+                                body: rawBody ?? body.map { Data($0.utf8) } ?? Data(), timeout: timeout)
     }
 
     // MARK: Sockets & time
 
     private static func udpSocket(interface: String?) throws -> Int32 {
         let s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard s >= 0 else { throw RTSPError.protocolError("socket()") }
+        guard s >= 0 else { throw RTSPClient.RTSPError.protocolError("socket()") }
         if let interface {
             var idx = if_nametoindex(interface)
             setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &idx, socklen_t(MemoryLayout<UInt32>.size))
@@ -453,7 +413,7 @@ final class AirPlaySession: AudioSink {
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
-        guard ok == 0 else { close(s); throw RTSPError.protocolError("bind()") }
+        guard ok == 0 else { close(s); throw RTSPClient.RTSPError.protocolError("bind()") }
         return s
     }
 
