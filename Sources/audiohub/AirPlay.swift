@@ -3,7 +3,6 @@ import CryptoKit
 import Darwin
 import Foundation
 import Network
-import os
 
 struct AirPlayDevice {
     let name: String
@@ -83,33 +82,26 @@ final class AirPlaySession: AudioSink {
     // Diagnostics
     private var statPackets = 0, statSendErrors = 0, statPeak: Int16 = 0, statTiming = 0, statTicks = 0
 
-    // Audio path: RT thread → float ring → converter (→44.1k Int16) → packets
-    private var lock = os_unfair_lock()
-    private let ringCapacity = 48_000 * 2 * 2
-    private let ring: UnsafeMutablePointer<Float>
-    private var writeIndex = 0, readIndex = 0
+    // Audio path: RT thread → lock-free float ring → converter (→44.1k Int16) → packets.
+    // Everything on the consumer side is allocated once, when the first audio arrives.
+    private let ring = SPSCRing<Float>(minimumCapacity: 48_000 * 2 * 2, zero: 0)
     private var inputRate: Double = 0
     private var converter: AVAudioConverter?
+    private var inBuffer: AVAudioPCMBuffer?
+    private var outBuffer: AVAudioPCMBuffer?
+    private static let chunkFrames: AVAudioFrameCount = 4_096
     private var pcm: [Int16] = []
+    private var pcmStart = 0
 
     init(device: AirPlayDevice) {
         self.device = device
-        ring = .allocate(capacity: ringCapacity)
     }
-
-    deinit { ring.deallocate() }
 
     // MARK: AudioSink (real-time thread)
 
     func consume(_ stereo: UnsafePointer<Float>, frames: Int, sampleRate: Double) {
         if inputRate == 0 { inputRate = sampleRate }
-        os_unfair_lock_lock(&lock)
-        for i in 0 ..< frames * 2 {
-            ring[writeIndex] = stereo[i]
-            writeIndex = (writeIndex + 1) % ringCapacity
-            if writeIndex == readIndex { readIndex = (readIndex + 1) % ringCapacity }
-        }
-        os_unfair_lock_unlock(&lock)
+        ring.write(stereo, count: frames * 2)   // lock-free, no allocation
     }
 
     // MARK: Lifecycle
@@ -266,42 +258,44 @@ final class AirPlaySession: AudioSink {
     /// Moves captured audio through the resampler and sends every full 352-frame packet.
     private func pump() {
         guard streaming, inputRate > 0 else { return }
-        os_unfair_lock_lock(&lock)
-        let count = (writeIndex - readIndex + ringCapacity) % ringCapacity
-        var floats = [Float](repeating: 0, count: count)
-        for i in 0 ..< count { floats[i] = ring[(readIndex + i) % ringCapacity] }
-        readIndex = writeIndex
-        os_unfair_lock_unlock(&lock)
-        guard count >= 2 else { return }
-        resample(floats)
-        let samplesPerPacket = Self.framesPerPacket * 2
-        while pcm.count >= samplesPerPacket {
-            let packet = Array(pcm.prefix(samplesPerPacket))
-            pcm.removeFirst(samplesPerPacket)
-            sendAudio(packet)
+        if converter == nil { setUpConverter() }
+        guard let converter, let inBuffer, let outBuffer,
+              let src = inBuffer.floatChannelData?[0] else { return }
+        // Drain the ring in fixed-size chunks through the preallocated buffers.
+        while true {
+            let samples = ring.read(into: src, maxCount: Int(Self.chunkFrames) * 2)
+            guard samples >= 2 else { break }
+            inBuffer.frameLength = AVAudioFrameCount(samples / 2)
+            outBuffer.frameLength = 0
+            var given = false
+            var err: NSError?
+            converter.convert(to: outBuffer, error: &err) { _, status in
+                if given { status.pointee = .noDataNow; return nil }
+                given = true; status.pointee = .haveData; return inBuffer
+            }
+            if let p = outBuffer.int16ChannelData?[0] {
+                pcm.append(contentsOf: UnsafeBufferPointer(start: p, count: Int(outBuffer.frameLength) * 2))
+            }
+            if samples < Int(Self.chunkFrames) * 2 { break }
         }
+        let samplesPerPacket = Self.framesPerPacket * 2
+        while pcm.count - pcmStart >= samplesPerPacket {
+            sendAudio(Array(pcm[pcmStart ..< pcmStart + samplesPerPacket]))
+            pcmStart += samplesPerPacket
+        }
+        // Compact occasionally instead of shifting the array on every packet.
+        if pcmStart > 32_768 { pcm.removeFirst(pcmStart); pcmStart = 0 }
     }
 
-    private func resample(_ interleaved: [Float]) {
-        let frames = interleaved.count / 2
-        let inFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inputRate, channels: 2, interleaved: true)!
-        let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Self.outputRate, channels: 2, interleaved: true)!
-        if converter == nil { converter = AVAudioConverter(from: inFormat, to: outFormat) }
-        guard let converter, let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: AVAudioFrameCount(frames)) else { return }
-        inBuf.frameLength = AVAudioFrameCount(frames)
-        interleaved.withUnsafeBufferPointer { src in
-            inBuf.mutableAudioBufferList.pointee.mBuffers.mData?.copyMemory(from: src.baseAddress!, byteCount: frames * 8)
-        }
-        let outCap = AVAudioFrameCount(Double(frames) * Self.outputRate / inputRate) + 64
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCap) else { return }
-        var given = false
-        var err: NSError?
-        converter.convert(to: outBuf, error: &err) { _, status in
-            if given { status.pointee = .noDataNow; return nil }
-            given = true; status.pointee = .haveData; return inBuf
-        }
-        guard let p = outBuf.int16ChannelData?[0] else { return }
-        pcm.append(contentsOf: UnsafeBufferPointer(start: p, count: Int(outBuf.frameLength) * 2))
+    private func setUpConverter() {
+        guard let inFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inputRate, channels: 2, interleaved: true),
+              let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Self.outputRate, channels: 2, interleaved: true)
+        else { return }
+        converter = AVAudioConverter(from: inFormat, to: outFormat)
+        inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: Self.chunkFrames)
+        let outCap = AVAudioFrameCount(Double(Self.chunkFrames) * Self.outputRate / inputRate) + 256
+        outBuffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCap)
+        pcm.reserveCapacity(65_536)
     }
 
     private func sendAudio(_ samples: [Int16]) {

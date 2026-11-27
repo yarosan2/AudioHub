@@ -14,7 +14,8 @@ cp Info.plist "$APP/Contents/Info.plist"
 rsync -a --delete Resources/ "$APP/Contents/Resources/"   # translations (*.lproj)
 
 compile() {
-  swiftc -sdk "$1" -target "$(uname -m)-apple-macos14.2" -O -suppress-warnings \
+  swiftc -sdk "$1" -target "$(uname -m)-apple-macos14.2" -O -suppress-warnings ${=SWIFTFLAGS} \
+    -I Sources/CAtomics/include \
     -o "$APP/Contents/MacOS/audiohub" $SOURCES $FRAMEWORKS
 }
 

@@ -22,8 +22,15 @@ final class Route {
 
     let processes: [AudioProcess]
     let destination: Destination
-    var gain: Float = 1.0
-    private(set) var peak: Float = 0
+    /// Set from the UI, read on the real-time thread.
+    var gain: Float {
+        get { gainBox.value }
+        set { gainBox.value = newValue }
+    }
+    /// Written on the real-time thread, read by the UI.
+    var peak: Float { peakBox.value }
+    private let gainBox = AtomicFloat(1)
+    private let peakBox = AtomicFloat(0)
 
     private var tapID = AudioObjectID.unknown
     private var aggregateID = AudioObjectID.unknown
@@ -155,7 +162,7 @@ final class Route {
                 p = max(p, abs(l), abs(r))
             }
         }
-        peak = max(p, peak * 0.9)
+        peakBox.value = max(p, peakBox.value * 0.9)
         return frames
     }
 

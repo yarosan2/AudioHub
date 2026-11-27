@@ -17,6 +17,8 @@ enum SelfTest {
     }
 
     static func run() -> Never {
+        ringBuffer()
+        ringBufferStress()
         alacFraming()
         httpValidation()
         httpServerLive()
@@ -25,6 +27,65 @@ enum SelfTest {
         rtspLive()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) failed")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    // MARK: Lock-free ring buffer
+
+    static func ringBuffer() {
+        let ring = SPSCRing<Int32>(minimumCapacity: 6, zero: 0)
+        check("ring: capacity rounds up to a power of two", ring.capacity == 8)
+        var src: [Int32] = Array(0 ..< 10)
+        var dst = [Int32](repeating: -1, count: 16)
+        let wrote = ring.write(&src, count: 10)
+        check("ring: full buffer takes only what fits", wrote == 8 && ring.dropped == 2)
+        let read = ring.read(into: &dst, maxCount: 16)
+        check("ring: reads back in order", read == 8 && Array(dst[0 ..< 8]) == Array(0 ..< 8))
+        check("ring: empty read returns 0", ring.read(into: &dst, maxCount: 16) == 0)
+        // Wrap-around: positions now at 8; write 5, read 3, write 5 → crosses the end.
+        var a: [Int32] = [100, 101, 102, 103, 104], b: [Int32] = [105, 106, 107, 108, 109]
+        ring.write(&a, count: 5)
+        _ = ring.read(into: &dst, maxCount: 3)
+        ring.write(&b, count: 5)
+        let n = ring.read(into: &dst, maxCount: 16)
+        check("ring: wrap-around keeps order", n == 7 && Array(dst[0 ..< 7]) == [103, 104, 105, 106, 107, 108, 109])
+    }
+
+    /// Two threads, odd chunk sizes, a small buffer: every value must arrive exactly once, in order.
+    static func ringBufferStress() {
+        let total = 20_000_000
+        let ring = SPSCRing<Int64>(minimumCapacity: 1_000, zero: 0)
+        let producerDone = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            var buf = [Int64](repeating: 0, count: 257)
+            var next: Int64 = 0
+            var chunk = 1
+            while next < total {
+                chunk = chunk % 257 + 1
+                let n = min(chunk, total - Int(next))
+                for i in 0 ..< n { buf[i] = next + Int64(i) }
+                var sent = 0
+                while sent < n {   // retry instead of dropping, so the sequence must be complete
+                    sent += buf.withUnsafeBufferPointer { ring.write($0.baseAddress! + sent, count: n - sent) }
+                }
+                next += Int64(n)
+            }
+            producerDone.signal()
+        }
+        var expected: Int64 = 0
+        var ok = true
+        var out = [Int64](repeating: 0, count: 300)
+        var chunk = 7
+        let start = Date()
+        while expected < total && Date().timeIntervalSince(start) < 30 {
+            chunk = chunk % 300 + 1
+            let n = ring.read(into: &out, maxCount: chunk)
+            for i in 0 ..< n where out[i] != expected + Int64(i) { ok = false }
+            expected += Int64(n)
+            if !ok { break }
+        }
+        _ = producerDone.wait(timeout: .now() + 5)
+        check("ring stress: 20M values across threads, none lost or reordered", ok && expected == total,
+              "got \(expected) of \(total)")
     }
 
     // MARK: HTTP stream server

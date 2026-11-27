@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import os
 
 /// Serves captured audio as an endless 16-bit PCM WAV over HTTP — the format the
 /// Chromecast Default Media Receiver can play from a plain URL.
@@ -16,12 +15,11 @@ final class PCMStreamServer: AudioSink {
     private var clients: [ObjectIdentifier: NWConnection] = [:]
     private var timer: DispatchSourceTimer?
 
-    // Ring buffer filled on the real-time thread, drained on `queue`.
-    private var lock = os_unfair_lock()
-    private let ringCapacity = 48_000 * 2 * 4  // ~4 s of stereo samples
-    private let ring: UnsafeMutablePointer<Int16>
-    private var writeIndex = 0
-    private var readIndex = 0
+    // Real-time thread → lock-free ring → `queue`. ~5 s of stereo 16-bit at 48 kHz.
+    private let ring = SPSCRing<Int16>(minimumCapacity: 48_000 * 2 * 5, zero: 0)
+    private static let maxBlockSamples = 16_384 * 2
+    private let produceScratch: UnsafeMutablePointer<Int16>   // RT thread only
+    private let drainScratch: UnsafeMutablePointer<Int16>     // `queue` only
     private(set) var sampleRate: Double = 0
     private let rateKnown = DispatchSemaphore(value: 0)
 
@@ -53,7 +51,8 @@ final class PCMStreamServer: AudioSink {
     }
 
     init() throws {
-        ring = .allocate(capacity: ringCapacity)
+        produceScratch = .allocate(capacity: Self.maxBlockSamples)
+        drainScratch = .allocate(capacity: 48_000 * 2)
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         listener = try NWListener(using: params, on: .any)
@@ -79,7 +78,8 @@ final class PCMStreamServer: AudioSink {
         timer?.cancel()
         listener.cancel()
         clients.values.forEach { $0.cancel() }
-        ring.deallocate()
+        produceScratch.deallocate()
+        drainScratch.deallocate()
     }
 
     /// Blocks until audio has started flowing (we need the sample rate for the WAV header).
@@ -94,33 +94,21 @@ final class PCMStreamServer: AudioSink {
 
     func consume(_ stereo: UnsafePointer<Float>, frames: Int, sampleRate: Double) {
         if self.sampleRate == 0 { self.sampleRate = sampleRate; rateKnown.signal() }
-        os_unfair_lock_lock(&lock)
-        for i in 0..<(frames * 2) {
-            let s = max(-1, min(1, stereo[i]))
-            ring[writeIndex] = Int16(s * 32767)
-            writeIndex = (writeIndex + 1) % ringCapacity
-            if writeIndex == readIndex { readIndex = (readIndex + 1) % ringCapacity }  // overrun: drop oldest
+        // No locks, no allocation: convert into preallocated scratch, then into the ring.
+        let n = min(frames * 2, Self.maxBlockSamples)
+        for i in 0 ..< n {
+            produceScratch[i] = Int16(max(-1, min(1, stereo[i])) * 32767)
         }
-        os_unfair_lock_unlock(&lock)
+        ring.write(produceScratch, count: n)
     }
 
     // MARK: Networking
 
     private func drain() {
-        os_unfair_lock_lock(&lock)
-        var chunk = Data()
-        if writeIndex != readIndex {
-            let count = (writeIndex - readIndex + ringCapacity) % ringCapacity
-            chunk.reserveCapacity(count * 2)
-            var i = readIndex
-            for _ in 0..<count {
-                withUnsafeBytes(of: ring[i].littleEndian) { chunk.append(contentsOf: $0) }
-                i = (i + 1) % ringCapacity
-            }
-            readIndex = writeIndex
-        }
-        os_unfair_lock_unlock(&lock)
-        guard !chunk.isEmpty else { return }
+        let count = ring.read(into: drainScratch, maxCount: 48_000 * 2)
+        guard count > 0 else { return }
+        // Int16 is little-endian on every Mac, so the samples go out as-is.
+        let chunk = Data(bytes: drainScratch, count: count * 2)
         // Diagnostics: bytes delivered and loudest sample, every ~3 s.
         chunk.withUnsafeBytes { raw in
             for s in raw.bindMemory(to: Int16.self) { statPeak = max(statPeak, abs(Int(s))) }
