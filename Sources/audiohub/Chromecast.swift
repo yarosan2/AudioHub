@@ -55,7 +55,7 @@ final class CastSession {
     let device: CastDevice
     private let queue = DispatchQueue(label: "audiohub.cast")
     private var connection: NWConnection?
-    private var buffer = Data()
+    private var framer = CastFramer()
     private var requestID = 1
     private var transportID: String?
     private var sessionID: String?
@@ -215,22 +215,24 @@ final class CastSession {
     private func receive() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, done, err in
             guard let self else { return }
-            if let data { self.buffer.append(data); self.parseFrames() }
+            if let data {
+                do {
+                    for body in try self.framer.feed(data) { self.handleFrame(body) }
+                } catch {
+                    self.onStatus?("cast protocol error: \(error); disconnecting")
+                    self.connection?.cancel()
+                    return
+                }
+            }
             if err == nil && !done { self.receive() } else { self.onStatus?("cast connection closed") }
         }
     }
 
-    private func parseFrames() {
-        while buffer.count >= 4 {
-            let len = Int(buffer.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) })
-            guard buffer.count >= 4 + len else { return }
-            let body = buffer.subdata(in: buffer.startIndex + 4 ..< buffer.startIndex + 4 + len)
-            buffer.removeFirst(4 + len)
-            let fields = Proto.decodeStrings(body)
-            if let ns = fields[4], let payload = fields[6],
-               let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] {
-                handle(namespace: ns, source: fields[2] ?? "receiver-0", json: obj)
-            }
+    private func handleFrame(_ body: Data) {
+        let fields = Proto.decodeStrings(body)
+        if let ns = fields[4], let payload = fields[6],
+           let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] {
+            handle(namespace: ns, source: fields[2] ?? "receiver-0", json: obj)
         }
     }
 }
@@ -273,5 +275,35 @@ enum Proto {
             }
         }
         return out
+    }
+}
+
+/// Splits the Cast byte stream into frames: 4-byte big-endian length + protobuf body.
+/// The length is checked as soon as the header arrives, before any body is buffered,
+/// so a peer cannot make us accumulate unbounded data.
+struct CastFramer {
+    /// Cast v2 caps messages at 64 KiB (kMaxMessageSize in Chromium's cast_channel).
+    static let maxFrameSize = 65_536
+
+    enum FrameError: Error, CustomStringConvertible {
+        case tooLarge(Int)
+        var description: String {
+            switch self { case .tooLarge(let n): return "frame of \(n) bytes exceeds \(CastFramer.maxFrameSize)" }
+        }
+    }
+
+    private var buffer = Data()
+
+    mutating func feed(_ data: Data) throws -> [Data] {
+        buffer.append(data)
+        var frames: [Data] = []
+        while buffer.count >= 4 {
+            let len = Int(buffer.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) })
+            guard len <= Self.maxFrameSize else { buffer.removeAll(); throw FrameError.tooLarge(len) }
+            guard buffer.count >= 4 + len else { break }
+            frames.append(buffer.subdata(in: buffer.startIndex + 4 ..< buffer.startIndex + 4 + len))
+            buffer.removeFirst(4 + len)
+        }
+        return frames
     }
 }

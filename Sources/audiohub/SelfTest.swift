@@ -19,6 +19,7 @@ enum SelfTest {
         alacFraming()
         httpValidation()
         httpServerLive()
+        castFraming()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) failed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -69,6 +70,33 @@ enum SelfTest {
         check("live: oversized request rejected", String(decoding: huge, as: UTF8.self).hasPrefix("HTTP/1.1 400") || huge.isEmpty)
         server.stop()
         check("live: stopped server refuses connections", TCPClient.exchange(port: port, "GET / HTTP/1.1\r\n\r\n", readBytes: 10).isEmpty)
+    }
+
+    // MARK: Cast framing
+
+    static func castFraming() {
+        func frame(_ body: [UInt8]) -> Data {
+            var d = Data(); d.appendBE(UInt32(body.count)); d.append(contentsOf: body); return d
+        }
+        var f = CastFramer()
+        let two = frame([1, 2, 3]) + frame([4])
+        check("Cast: two frames in one read", (try? f.feed(two)) == [Data([1, 2, 3]), Data([4])])
+
+        var g = CastFramer()
+        let whole = frame(Array(repeating: 7, count: 1000))
+        let a = (try? g.feed(whole.prefix(2))) ?? [Data()]
+        let b = (try? g.feed(whole.dropFirst(2).prefix(500))) ?? [Data()]
+        let c = (try? g.feed(whole.dropFirst(502))) ?? []
+        check("Cast: frame split across reads", a.isEmpty && b.isEmpty && c == [Data(repeating: 7, count: 1000)])
+
+        var h = CastFramer()
+        check("Cast: 64 KiB frame accepted", (try? h.feed(frame(Array(repeating: 0, count: 65_536))))?.count == 1)
+
+        var k = CastFramer()
+        var huge = Data(); huge.appendBE(UInt32(0x7FFF_FFFF))
+        var threw = false
+        do { _ = try k.feed(huge) } catch { threw = true }
+        check("Cast: oversized length rejected from the header alone", threw)
     }
 
     // MARK: ALAC
