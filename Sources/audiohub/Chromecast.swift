@@ -229,7 +229,10 @@ final class CastSession {
     }
 
     private func handleFrame(_ body: Data) {
-        let fields = Proto.decodeStrings(body)
+        guard let fields = Proto.decodeStrings(body) else {
+            onStatus?("ignored a malformed cast message (\(body.count) bytes)")
+            return
+        }
         if let ns = fields[4], let payload = fields[6],
            let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] {
             handle(namespace: ns, source: fields[2] ?? "receiver-0", json: obj)
@@ -249,29 +252,45 @@ enum Proto {
         let b = Data(s.utf8)
         varint(n << 3 | 2, into: &d); varint(UInt64(b.count), into: &d); d.append(b)
     }
-    static func decodeStrings(_ d: Data) -> [Int: String] {
+    /// Decodes the length-delimited fields of a protobuf message as UTF-8 strings, keyed by
+    /// field number. Returns nil for malformed input (never traps): varints longer than 10 bytes
+    /// or overflowing 64 bits, lengths beyond the message, truncated fields, field number 0,
+    /// and wire types other than 0, 1, 2 and 5. Fixed-size fields are skipped. Non-UTF-8 bytes
+    /// fields are left out, as before.
+    static func decodeStrings(_ d: Data) -> [Int: String]? {
         var out: [Int: String] = [:]
         let bytes = [UInt8](d)
         var i = 0
         func readVarint() -> UInt64? {
-            var r: UInt64 = 0, shift: UInt64 = 0
-            while i < bytes.count {
+            var r: UInt64 = 0
+            for n in 0 ..< 10 {
+                guard i < bytes.count else { return nil }        // truncated
                 let b = bytes[i]; i += 1
-                r |= UInt64(b & 0x7F) << shift
+                if n == 9 && b > 0x01 { return nil }             // would overflow 64 bits
+                r |= UInt64(b & 0x7F) << UInt64(7 * n)
                 if b < 0x80 { return r }
-                shift += 7
             }
-            return nil
+            return nil                                           // more than 10 bytes
         }
-        while i < bytes.count, let key = readVarint() {
-            let field = Int(key >> 3)
+        func skip(_ n: Int) -> Bool {
+            guard bytes.count - i >= n else { return false }
+            i += n
+            return true
+        }
+        while i < bytes.count {
+            guard let key = readVarint() else { return nil }
+            let fieldNumber = key >> 3
+            guard fieldNumber >= 1, fieldNumber <= 536_870_911 else { return nil }   // 2^29 - 1
             switch key & 7 {
-            case 0: _ = readVarint()
+            case 0: guard readVarint() != nil else { return nil }
+            case 1: guard skip(8) else { return nil }
             case 2:
-                guard let len = readVarint(), i + Int(len) <= bytes.count else { return out }
-                out[field] = String(bytes: bytes[i ..< i + Int(len)], encoding: .utf8)
-                i += Int(len)
-            default: return out
+                guard let len = readVarint(), len <= UInt64(bytes.count - i) else { return nil }
+                let n = Int(len)   // safe: bounded by the remaining byte count
+                out[Int(fieldNumber)] = String(bytes: bytes[i ..< i + n], encoding: .utf8)
+                i += n
+            case 5: guard skip(4) else { return nil }
+            default: return nil
             }
         }
         return out

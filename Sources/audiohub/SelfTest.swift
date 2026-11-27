@@ -37,6 +37,7 @@ enum SelfTest {
         updateCodeIdentity()
         updateInstallFlow()
         castFraming()
+        protobufDecoding()
         rtspParsing()
         rtspLive()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) failed")
@@ -207,6 +208,49 @@ enum SelfTest {
         var threw = false
         do { _ = try k.feed(huge) } catch { threw = true }
         check("Cast: oversized length rejected from the header alone", threw)
+    }
+
+    // MARK: Protobuf (CastMessage) decoding
+
+    static func protobufDecoding() {
+        var valid = Data()
+        Proto.varintField(1, 0, into: &valid)
+        Proto.stringField(2, "receiver-0", into: &valid)
+        Proto.stringField(4, "urn:x-cast:com.google.cast.media", into: &valid)
+        Proto.varintField(5, 0, into: &valid)
+        Proto.stringField(6, "{\"type\":\"PING\"}", into: &valid)
+        let f = Proto.decodeStrings(valid)
+        check("protobuf: valid CastMessage decodes", f?[2] == "receiver-0" && f?[6] == "{\"type\":\"PING\"}")
+
+        // Field 6, wire type 2, length = 2^63 (10-byte varint): used to trap in Int(len).
+        let hugeLen = Data([0x32, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01])
+        check("protobuf: length beyond Int.max rejected, no crash", Proto.decodeStrings(hugeLen) == nil)
+        check("protobuf: length beyond the message rejected", Proto.decodeStrings(Data([0x32, 0x05, 0x61, 0x62])) == nil)
+        check("protobuf: varint longer than 10 bytes rejected",
+              Proto.decodeStrings(Data([0x08] + Array(repeating: 0xFF, count: 10) + [0x01])) == nil)
+        check("protobuf: 10th varint byte overflowing 64 bits rejected",
+              Proto.decodeStrings(Data([0x08] + Array(repeating: 0xFF, count: 9) + [0x02])) == nil)
+        check("protobuf: truncated varint rejected", Proto.decodeStrings(Data([0x08, 0x80])) == nil)
+        check("protobuf: truncated key rejected", Proto.decodeStrings(valid + Data([0x80])) == nil)
+        for wt: UInt8 in [3, 4, 6, 7] {
+            check("protobuf: invalid wire type \(wt) rejected", Proto.decodeStrings(Data([0x08 | wt, 0x00])) == nil)
+        }
+        check("protobuf: field number 0 rejected", Proto.decodeStrings(Data([0x02, 0x00])) == nil)
+        // Fixed-size fields are valid protobuf: skipped, later fields still read.
+        var withFixed = Data([0x39] + Array(repeating: 0xAA, count: 8))   // field 7, fixed64
+        withFixed += Data([0x45, 1, 2, 3, 4])                                // field 8, fixed32
+        Proto.stringField(2, "after", into: &withFixed)
+        check("protobuf: fixed64/fixed32 fields skipped", Proto.decodeStrings(withFixed)?[2] == "after")
+        check("protobuf: truncated fixed64 rejected", Proto.decodeStrings(Data([0x39, 1, 2, 3])) == nil)
+        // Random garbage must never crash.
+        var rng = SystemRandomNumberGenerator()
+        var decoded = 0
+        for _ in 0 ..< 50_000 {
+            let n = Int.random(in: 0 ... 40, using: &rng)
+            let junk = Data((0 ..< n).map { _ in UInt8.random(in: 0 ... 255, using: &rng) })
+            if Proto.decodeStrings(junk) != nil { decoded += 1 }
+        }
+        check("protobuf: 50k random inputs, no crash", true, "\(decoded) parsed")
     }
 
     // MARK: RTSP
