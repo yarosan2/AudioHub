@@ -72,23 +72,37 @@ final class PCMStreamServer: AudioSink {
         }
     }
 
-    init(maxInFlightBytes: Int = PCMStreamServer.defaultMaxInFlightBytes) throws {
+    /// `port` is for tests; normally the system picks a free one.
+    init(maxInFlightBytes: Int = PCMStreamServer.defaultMaxInFlightBytes, port: NWEndpoint.Port = .any) throws {
         self.maxInFlightBytes = maxInFlightBytes
         produceScratch = .allocate(capacity: Self.maxBlockSamples)
         drainScratch = .allocate(capacity: 48_000 * 2)
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        listener = try NWListener(using: params, on: .any)
+        listener = try NWListener(using: params, on: port)
         listener.newConnectionHandler = { [weak self] c in self?.accept(c) }
-        let ready = DispatchSemaphore(value: 0)
+        // Wait for the listener to actually be ready; anything else is an error, not a
+        // server without a port (the speaker would be sent a URL nobody answers).
+        let settled = DispatchSemaphore(value: 0)
+        let outcome = ListenerOutcome()
         listener.stateUpdateHandler = { state in
             switch state {
-            case .ready, .failed, .cancelled: ready.signal()
+            case .ready: outcome.set(nil); settled.signal()
+            case .failed(let e): outcome.set(e); settled.signal()
+            case .waiting(let e): outcome.set(e); settled.signal()   // e.g. port in use; would retry forever
+            case .cancelled: outcome.set(UserError("listener cancelled")); settled.signal()
             default: break
             }
         }
         listener.start(queue: queue)
-        _ = ready.wait(timeout: .now() + 3)
+        let timedOut = settled.wait(timeout: .now() + 3) == .timedOut
+        if timedOut || outcome.error != nil || listener.port == nil || listener.port?.rawValue == 0 {
+            // Every stored property is set, so deinit runs on this throw and frees the buffers;
+            // do not free them here too.
+            listener.stateUpdateHandler = nil
+            listener.cancel()
+            throw UserError("Could not start the audio stream server: \(timedOut ? "timed out" : "\(outcome.error.map { "\($0)" } ?? "no port")")")
+        }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .milliseconds(20))
         t.setEventHandler { [weak self] in self?.drain() }
@@ -260,4 +274,13 @@ final class PCMStreamServer: AudioSink {
 
 func log(_ s: String) {
     FileHandle.standardError.write("\n[\(Date().formatted(date: .omitted, time: .standard))] \(s)".data(using: .utf8)!)
+}
+
+/// Records the first terminal state of a listener (written on its queue, read after a semaphore).
+private final class ListenerOutcome {
+    private let lock = NSLock()
+    private var done = false
+    private var _error: Error?
+    func set(_ e: Error?) { lock.lock(); if !done { done = true; _error = e }; lock.unlock() }
+    var error: Error? { lock.lock(); defer { lock.unlock() }; return _error }
 }

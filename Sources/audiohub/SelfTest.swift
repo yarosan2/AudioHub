@@ -310,6 +310,25 @@ enum SelfTest {
         let huge = TCPClient.exchange(port: port, String(repeating: "A", count: 20_000), readBytes: 100)
         check("live: oversized request rejected", String(decoding: huge, as: UTF8.self).hasPrefix("HTTP/1.1 400") || huge.isEmpty)
         server.stop()
+        // A listener that cannot start must make init fail instead of yielding a server without a port.
+        let blocker = socket(AF_INET, SOCK_STREAM, 0)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = INADDR_ANY
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(blocker, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        listen(blocker, 1)
+        var bound = sockaddr_in(); var blen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(blocker, $0, &blen) } }
+        let busyPort = UInt16(bigEndian: bound.sin_port)
+        let t0 = Date()
+        var initThrew = false
+        var gotServer: PCMStreamServer?
+        do { gotServer = try PCMStreamServer(port: NWEndpoint.Port(rawValue: busyPort)!) } catch { initThrew = true; print("      reason: \(error)") }
+        close(blocker)
+        check("live: init fails when the listener cannot start (port \(busyPort) taken)",
+              initThrew, "init returned a server with port \(gotServer?.port ?? 0)")
+        check("live: …and fails promptly (\(String(format: "%.1f", Date().timeIntervalSince(t0))) s)", Date().timeIntervalSince(t0) < 4)
+        gotServer?.stop()
         check("live: stopped server refuses connections", TCPClient.exchange(port: port, "GET / HTTP/1.1\r\n\r\n", readBytes: 10).isEmpty)
     }
 
