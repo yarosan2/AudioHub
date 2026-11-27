@@ -20,6 +20,7 @@ No speakers or permissions needed. Run it from the repository root (it reads
 | AirPlay resend | ranges across the 16-bit sequence wrap, reply format, too-old packets, capped counts |
 | Stereo delay | sample-exact delay, click-free delay changes (with a control run proving the check detects a jump), rapid changes |
 | ALAC | uncompressed frame layout and round-trip |
+| Updates | version comparison; `Tests/Fixtures/github-release-latest.json` (a real GitHub API answer) parses; allowed download hosts; Ed25519 sign/verify incl. tampering and wrong keys; code identity of copies (intact, modified, ad-hoc re-signed); **full install** against a local fake GitHub: a good update replaces the app, while a tampered archive, another key, another certificate, a non-newer version and a wrong size are all refused with the installed app untouched (needs the signing certificate, otherwise SKIP) |
 
 ### Recording a fixture from a real device
 
@@ -67,6 +68,14 @@ Use a long, steady source (a music stream, or `say -o test.aiff "…"` + `afplay
 2. Drag the offset slider back and forth with music playing. **Expect:** the sound shifts
    without clicks or pops.
 3. Leave it playing for an hour; note how far it drifts (re-check with the clicks).
+
+### Updates
+1. `audiohub check-update` prints the installed version, whether this is a release build,
+   and what GitHub currently offers.
+2. With a release build installed, publish a newer release (zip + .sig). Within a day — or
+   via gear → Check for Updates — the menu offers **Install**; after it AudioHub restarts with
+   the new version, routes are restored, and audio capture still works (no new permission
+   prompt).
 
 ### Volume
 1. Move a speaker's slider. **Expect:** the speaker's own volume changes immediately.

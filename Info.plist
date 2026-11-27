@@ -18,6 +18,8 @@
     <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.2</string>
     <key>LSUIElement</key><true/>
+    <key>AHUpdateRepository</key><string>yarosan2/AudioHub</string>
+    <key>AHUpdatePublicKey</key><string>zH7YCoZ2pct/a66PwEQC4/kjz/eE+VRrGs3tC51fiPk=</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>AudioHub captures the sound of the apps you choose to send it to other speakers.</string>
     <key>NSLocalNetworkUsageDescription</key>

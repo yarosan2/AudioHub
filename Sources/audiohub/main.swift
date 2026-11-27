@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 func usage() -> Never {
@@ -141,6 +142,43 @@ do {
     switch args.first {
     case "selftest":
         SelfTest.run(arguments: Array(args.dropFirst()))
+    case "update-keygen":
+        // Creates the release signing key (once) and prints the public key for Info.plist.
+        if let existing = SigningKeyStore.load() {
+            print("A signing key already exists in the keychain. Public key:")
+            print(existing.publicKey.rawRepresentation.base64EncodedString())
+        } else {
+            let key = Curve25519.Signing.PrivateKey()
+            try SigningKeyStore.save(key)
+            print("Created a new signing key in your login keychain (\"\(SigningKeyStore.service)\").")
+            print("Put this public key into Info.plist as AHUpdatePublicKey:")
+            print(key.publicKey.rawRepresentation.base64EncodedString())
+            print("Back up the private key (64 hex characters) into a password manager:")
+            print("  security find-generic-password -s \"\(SigningKeyStore.service)\" -w")
+        }
+    case "sign-update":
+        guard args.count == 2 else { print("usage: audiohub sign-update <AudioHub-x.y.z.zip>"); exit(1) }
+        guard let key = SigningKeyStore.load() else { print("No signing key; run update-keygen first."); exit(1) }
+        let url = URL(fileURLWithPath: args[1])
+        let data = try Data(contentsOf: url)
+        let sig = try UpdateSignature.sign(data, with: key)
+        guard let embedded = UpdateConfig.publicKey,
+              UpdateSignature.verify(data, signature: sig, publicKey: embedded) else {
+            print("The key in the keychain does not match AHUpdatePublicKey in this build's Info.plist.")
+            exit(1)
+        }
+        try (sig + "\n").write(to: url.appendingPathExtension("sig"), atomically: true, encoding: .utf8)
+        print("wrote \(url.lastPathComponent).sig (verified against the embedded public key)")
+    case "check-update":
+        let sem = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            let m = UpdateManager()
+            await m.check(userInitiated: true)
+            print("installed: \(AppVersion.current), release build: \(UpdateConfig.isReleaseBuild), in-app install: \(m.canInstallInApp)")
+            print("result: \(m.state)")
+            sem.signal()
+        }
+        while sem.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     case "list":
         try list()
     case "speakers", "cast-list":

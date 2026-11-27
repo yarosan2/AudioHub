@@ -5,10 +5,11 @@ import SwiftUI
 struct AudioHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var engine = Engine()
+    @StateObject private var updates = UpdateManager()
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView(engine: engine)
+            MenuView(engine: engine, updates: updates)
                 .onAppear { delegate.engine = engine }
         } label: {
             Image(systemName: engine.activeCount > 0 ? "hifispeaker.2.fill" : "hifispeaker.2")
@@ -26,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct MenuView: View {
     @ObservedObject var engine: Engine
+    @ObservedObject var updates: UpdateManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -40,6 +42,7 @@ struct MenuView: View {
                         .help(L("Search the network for speakers again"))
                 }
             }
+            UpdateBanner(updates: updates, language: engine.language)
             MasterVolumeRow(engine: engine)
             Divider()
             if engine.apps.isEmpty {
@@ -63,6 +66,7 @@ struct MenuView: View {
             HStack {
                 Text(speakerSummary).font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                UpdateMenu(updates: updates, language: engine.language)
                 LanguageMenu(engine: engine)
                 Button(L("Quit")) { NSApp.terminate(nil) }.buttonStyle(.borderless)
             }
@@ -294,5 +298,84 @@ struct LanguageMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(L("Language"))
+    }
+}
+
+/// Shown at the top of the menu when there is something to say about updates.
+struct UpdateBanner: View {
+    @ObservedObject var updates: UpdateManager
+    let language: String   // re-render when the UI language changes
+
+    var body: some View {
+        switch updates.state {
+        case .idle:
+            EmptyView()
+        case .checking:
+            row(icon: nil) { Text(L("Checking for updates…")) }
+        case .upToDate:
+            row(icon: "checkmark.circle.fill", tint: .green) { Text(L("AudioHub is up to date.")) }
+        case .available(let release):
+            row(icon: "arrow.down.circle.fill", tint: .accentColor) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("Version %@ is available", release.version)).fontWeight(.semibold)
+                    Button(L("What’s new")) { updates.openReleasePage(release) }
+                        .buttonStyle(.link).font(.caption)
+                }
+                Spacer()
+                if updates.canInstallInApp && release.isInstallable {
+                    Button(L("Install")) { Task { await updates.install(release) } }
+                        .controlSize(.small)
+                        .help(L("Download, verify and install, then restart AudioHub"))
+                } else {
+                    Button(L("Download")) { updates.openReleasePage(release) }
+                        .controlSize(.small)
+                        .help(L("This copy was built from source: download the release or rebuild"))
+                }
+            }
+        case .working(let step):
+            row(icon: nil) { Text(step) }
+        case .failed(let message):
+            row(icon: "exclamationmark.triangle.fill", tint: .orange) {
+                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button(L("OK")) { updates.dismiss() }.controlSize(.small)
+            }
+        }
+    }
+
+    private func row<Content: View>(icon: String?, tint: Color = .secondary,
+                                    @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            if let icon {
+                Image(systemName: icon).foregroundStyle(tint)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+            content()
+        }
+        .font(.callout)
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Gear button: check now, automatic checks, version.
+struct UpdateMenu: View {
+    @ObservedObject var updates: UpdateManager
+    let language: String
+
+    var body: some View {
+        Menu {
+            Button(L("Check for Updates")) { Task { await updates.check(userInitiated: true) } }
+            Toggle(L("Check Automatically"), isOn: $updates.autoCheck)
+            Divider()
+            Text(L("Version %@", AppVersion.current))
+        } label: {
+            Image(systemName: "gearshape")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(L("Updates"))
     }
 }

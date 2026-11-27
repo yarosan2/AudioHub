@@ -60,6 +60,23 @@ identity every time it is rebuilt, and macOS then silently revokes audio capture
 permission granted once survives rebuilds. The certificate is used for nothing else and can
 be deleted in Keychain Access at any time.
 
+## Updates
+
+AudioHub checks GitHub once a day for a newer release (turn it off under the gear menu,
+where you can also check manually). When one is available, the top of the menu says so.
+
+- **Installed from a release zip:** click **Install**. AudioHub downloads the update, verifies
+  it and restarts. Privacy permissions are kept, because every release is signed with the same
+  certificate.
+- **Built from source:** you only get a notice with a link; pull and run `scripts/install.sh`.
+
+An update is installed only if all of these hold, otherwise nothing is changed:
+the archive comes from GitHub, matches the size in the release, carries a valid Ed25519
+signature from the project's release key (public half in `Info.plist`, private half never
+leaves the maintainer's keychain), contains the same app (bundle identifier) with a newer
+version, and that app's code signature is intact and from the same certificate as the
+running copy. A compromised GitHub account alone therefore cannot push code to users.
+
 ## Usage
 
 Click the speaker icon in the menu bar. Apps that are playing show a green waveform. Choose a
@@ -115,6 +132,7 @@ app ──► Core Audio process tap (muted at its original output)
 | `StereoPair.swift` | channel splitter with crossfading delay line and calibration clicks |
 | `SPSCRing.swift` | lock-free ring between the audio thread and the senders |
 | `RTSP.swift` | RTSP client: one read loop, responses matched by CSeq |
+| `Updater.swift` | update check, Ed25519 verification, code-identity check, installer |
 | `SelfTest.swift` | `audiohub selftest` |
 | `Engine.swift` | routing state, persistence, volume |
 | `MenuBarUI.swift` | SwiftUI menu-bar interface |
@@ -136,6 +154,18 @@ AudioHub only talks to devices on your local network.
   clear on the LAN.
 
 ## Development
+
+### Releasing
+
+```bash
+# bump CFBundleShortVersionString in Info.plist, commit, then:
+scripts/release.sh 0.2.1
+```
+
+Builds a release build, runs the self-test, writes `build/AudioHub-<version>.zip` and its
+`.zip.sig`. Attach both to a GitHub release tagged `v<version>`. Signing needs the release key
+in the keychain (`audiohub update-keygen` creates it once and prints the public key for
+`AHUpdatePublicKey`) and the *AudioHub Local Signing* certificate.
 
 ```bash
 ./build.sh                                          # build build/AudioHub.app

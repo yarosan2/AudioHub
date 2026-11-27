@@ -5,6 +5,7 @@ line endings are CRLF and must stay that way (see `.gitattributes`).
 
 | File | Source | Edits |
 | --- | --- | --- |
+| `github-release-latest.json` | Answer of `GET https://api.github.com/repos/yarosan2/AudioHub/releases/latest` for v0.2.0 (zip attached, no signature). | None. |
 | `chromecast-get.http` | The HTTP request a Google Cast speaker (CrKey 1.52, Xiaomi Mi Smart Speaker) sends to fetch the WAV stream. Recorded with `AUDIOHUB_DUMP_HTTP_DIR=<dir> ./run.sh route <app>=cast:<speaker>`. | Per-route token replaced with `0123456789abcdef0123456789abcdef`; the Mac's LAN address in `Host` replaced with `192.0.2.10` (documentation range). Everything else is byte-for-byte. |
 
 Why this exists: an earlier parser looked for the end of the request line with

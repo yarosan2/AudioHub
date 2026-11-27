@@ -51,3 +51,34 @@
 "Choose two different speakers for the stereo pair." = "Обери дві різні колонки для стереопари.";
 "Speaker “%@” was not found on the network." = "Колонку «%@» не знайдено в мережі.";
 "Unknown destination %@." = "Невідоме призначення %@.";
+
+/* Updates */
+"Unexpected answer from GitHub." = "Неочікувана відповідь від GitHub.";
+"This release has no installable archive." = "У цьому релізі немає архіву для встановлення.";
+"Refusing to download the update from an unexpected address." = "Оновлення відхилено: неочікувана адреса завантаження.";
+"Downloading…" = "Завантаження…";
+"The download is incomplete. Nothing was installed." = "Завантаження неповне. Нічого не встановлено.";
+"Verifying…" = "Перевірка…";
+"The update’s signature is invalid. Nothing was installed." = "Підпис оновлення недійсний. Нічого не встановлено.";
+"The update archive does not contain AudioHub." = "В архіві оновлення немає AudioHub.";
+"The update is not newer than the installed version." = "Оновлення не новіше за встановлену версію.";
+"The update is signed by a different developer. Nothing was installed." = "Оновлення підписано іншим розробником. Нічого не встановлено.";
+"Installing…" = "Встановлення…";
+"Download failed (HTTP %ld)." = "Помилка завантаження (HTTP %ld).";
+"The download is too large." = "Завантаження завелике.";
+"Could not unpack the update." = "Не вдалося розпакувати оновлення.";
+"Could not check for updates: %@" = "Не вдалося перевірити оновлення: %@";
+"In-app updates are not available for this build." = "Для цієї збірки оновлення із програми недоступне.";
+"Checking for updates…" = "Перевіряю оновлення…";
+"AudioHub is up to date." = "Встановлено останню версію AudioHub.";
+"Version %@ is available" = "Доступна версія %@";
+"What’s new" = "Що нового";
+"Install" = "Встановити";
+"Download, verify and install, then restart AudioHub" = "Завантажити, перевірити, встановити й перезапустити AudioHub";
+"Download" = "Завантажити";
+"This copy was built from source: download the release or rebuild" = "Цю копію зібрано з вихідного коду: завантаж реліз або перезбери";
+"OK" = "OK";
+"Check for Updates" = "Перевірити оновлення";
+"Check Automatically" = "Перевіряти автоматично";
+"Version %@" = "Версія %@";
+"Updates" = "Оновлення";

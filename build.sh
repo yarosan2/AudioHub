@@ -11,6 +11,9 @@ FRAMEWORKS=(-framework CoreAudio -framework AudioToolbox -framework AppKit -fram
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
+# Release builds (scripts/release.sh sets RELEASE=1) may install updates in-app;
+# builds from source only announce them.
+[ "$RELEASE" = 1 ] && plutil -insert AHReleaseBuild -bool true "$APP/Contents/Info.plist"
 rsync -a --delete Resources/ "$APP/Contents/Resources/"   # translations (*.lproj)
 
 compile() {

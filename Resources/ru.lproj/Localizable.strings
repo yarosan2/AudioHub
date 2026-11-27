@@ -51,3 +51,34 @@
 "Choose two different speakers for the stereo pair." = "Выбери две разные колонки для стереопары.";
 "Speaker “%@” was not found on the network." = "Колонка «%@» не найдена в сети.";
 "Unknown destination %@." = "Неизвестное назначение %@.";
+
+/* Updates */
+"Unexpected answer from GitHub." = "Неожиданный ответ от GitHub.";
+"This release has no installable archive." = "В этом релизе нет архива для установки.";
+"Refusing to download the update from an unexpected address." = "Обновление отклонено: неожиданный адрес загрузки.";
+"Downloading…" = "Загрузка…";
+"The download is incomplete. Nothing was installed." = "Загрузка неполная. Ничего не установлено.";
+"Verifying…" = "Проверка…";
+"The update’s signature is invalid. Nothing was installed." = "Подпись обновления недействительна. Ничего не установлено.";
+"The update archive does not contain AudioHub." = "В архиве обновления нет AudioHub.";
+"The update is not newer than the installed version." = "Обновление не новее установленной версии.";
+"The update is signed by a different developer. Nothing was installed." = "Обновление подписано другим разработчиком. Ничего не установлено.";
+"Installing…" = "Установка…";
+"Download failed (HTTP %ld)." = "Ошибка загрузки (HTTP %ld).";
+"The download is too large." = "Загрузка слишком большая.";
+"Could not unpack the update." = "Не удалось распаковать обновление.";
+"Could not check for updates: %@" = "Не удалось проверить обновления: %@";
+"In-app updates are not available for this build." = "Для этой сборки обновление из приложения недоступно.";
+"Checking for updates…" = "Проверяю обновления…";
+"AudioHub is up to date." = "Установлена последняя версия AudioHub.";
+"Version %@ is available" = "Доступна версия %@";
+"What’s new" = "Что нового";
+"Install" = "Установить";
+"Download, verify and install, then restart AudioHub" = "Скачать, проверить, установить и перезапустить AudioHub";
+"Download" = "Скачать";
+"This copy was built from source: download the release or rebuild" = "Эта копия собрана из исходников: скачай релиз или пересобери";
+"OK" = "OK";
+"Check for Updates" = "Проверить обновления";
+"Check Automatically" = "Проверять автоматически";
+"Version %@" = "Версия %@";
+"Updates" = "Обновления";

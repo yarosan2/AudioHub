@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -30,6 +31,11 @@ enum SelfTest {
         httpValidation()
         httpServerLive()
         chromecastFixture()
+        updateVersions()
+        updateReleaseParsing()
+        updateSignatures()
+        updateCodeIdentity()
+        updateInstallFlow()
         castFraming()
         rtspParsing()
         rtspLive()
@@ -400,6 +406,216 @@ enum SelfTest {
         check("stereo: rapid changes end at the last value (left +2400)", l3i == 52_400 && r3i == 50_000, "left \(l3i ?? -1), right \(r3i ?? -1)")
     }
 
+    // MARK: Updates
+
+    static func updateVersions() {
+        check("version: 0.10.0 > 0.9.9", AppVersion.isNewer("0.10.0", than: "0.9.9"))
+        check("version: v0.3.0 > 0.2.0 (leading v)", AppVersion.isNewer("v0.3.0", than: "0.2.0"))
+        check("version: 1.2 == 1.2.0", AppVersion.compare("1.2", "1.2.0") == .orderedSame)
+        check("version: same is not newer", !AppVersion.isNewer("0.2.0", than: "0.2.0"))
+        check("version: older is not newer", !AppVersion.isNewer("0.1.9", than: "0.2.0"))
+        check("version: suffix ignored (1.0.0-beta == 1.0.0)", AppVersion.compare("1.0.0-beta", "1.0.0") == .orderedSame)
+    }
+
+    static func updateReleaseParsing() {
+        let url = URL(fileURLWithPath: fixturesDir).appendingPathComponent("github-release-latest.json")
+        guard let data = try? Data(contentsOf: url) else {
+            check("fixture: github-release-latest.json present", false, "not found at \(url.path)")
+            return
+        }
+        let r = try? ReleaseInfo.parse(data)
+        check("release: real GitHub response parses (v0.2.0)", r?.version == "0.2.0"
+              && r?.pageURL.absoluteString == "https://github.com/yarosan2/AudioHub/releases/tag/v0.2.0")
+        check("release: zip asset found with its size",
+              r?.zipURL?.lastPathComponent == "AudioHub-0.2.0.zip" && r?.zipSize == 357_923)
+        check("release: without a .sig it is not installable (notify only)", r?.signatureURL == nil && r?.isInstallable == false)
+
+        // Same response with a signature attached.
+        var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        var assets = obj["assets"] as? [[String: Any]] ?? []
+        assets.append(["name": "AudioHub-0.2.0.zip.sig", "size": 89,
+                       "browser_download_url": "https://github.com/yarosan2/AudioHub/releases/download/v0.2.0/AudioHub-0.2.0.zip.sig"])
+        obj["assets"] = assets
+        let signed = (try? JSONSerialization.data(withJSONObject: obj)).flatMap { try? ReleaseInfo.parse($0) }
+        check("release: with zip + .sig it is installable", signed?.isInstallable == true)
+        check("release: garbage is rejected", (try? ReleaseInfo.parse(Data("{}".utf8))) == nil)
+
+        check("download hosts: github.com and its CDN allowed",
+              UpdateConfig.isAllowedDownload(URL(string: "https://github.com/a/b/releases/download/v1/x.zip")!)
+              && UpdateConfig.isAllowedDownload(URL(string: "https://objects.githubusercontent.com/x")!)
+              && UpdateConfig.isAllowedDownload(URL(string: "https://release-assets.githubusercontent.com/x")!))
+        check("download hosts: others and plain http refused",
+              !UpdateConfig.isAllowedDownload(URL(string: "https://evil.example/x.zip")!)
+              && !UpdateConfig.isAllowedDownload(URL(string: "http://github.com/x.zip")!)
+              && !UpdateConfig.isAllowedDownload(URL(string: "https://github.com.evil.example/x.zip")!))
+    }
+
+    static func updateSignatures() {
+        let key = Curve25519.Signing.PrivateKey(), other = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        let data = Data((0 ..< 10_000).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let sig = (try? UpdateSignature.sign(data, with: key)) ?? ""
+        check("signature: valid one verifies", UpdateSignature.verify(data, signature: sig + "\n", publicKey: pub))
+        var tampered = data; tampered[5_000] ^= 1
+        check("signature: one flipped bit fails", !UpdateSignature.verify(tampered, signature: sig, publicKey: pub))
+        let wrong = (try? UpdateSignature.sign(data, with: other)) ?? ""
+        check("signature: another key fails", !UpdateSignature.verify(data, signature: wrong, publicKey: pub))
+        check("signature: garbage fails", !UpdateSignature.verify(data, signature: "not base64!", publicKey: pub)
+              && !UpdateSignature.verify(data, signature: sig, publicKey: "AAAA"))
+    }
+
+    /// The running selftest binary is build/AudioHub.app, so its identity is the reference.
+    static func updateCodeIdentity() {
+        guard let req = CodeIdentity.runningAppRequirement(), !CodeIdentity.runningAppIsAdHoc else {
+            print("SKIP  code identity: this build is ad-hoc signed (run scripts/make-signing-cert.sh)")
+            return
+        }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ah-ident-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let copy = tmp.appendingPathComponent("AudioHub.app")
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        try? FileManager.default.copyItem(at: Bundle.main.bundleURL, to: copy)
+        check("code identity: identical copy accepted", CodeIdentity.validate(copy, against: req))
+
+        let res = copy.appendingPathComponent("Contents/Resources/en.lproj/Localizable.strings")
+        let original = try? Data(contentsOf: res)
+        try? Data("/* tampered */".utf8).write(to: res)
+        check("code identity: modified resource rejected", !CodeIdentity.validate(copy, against: req))
+        try? original?.write(to: res)
+
+        _ = shell("/usr/bin/codesign", ["-s", "-", "-f", copy.path])
+        check("code identity: ad-hoc re-signed copy rejected", !CodeIdentity.validate(copy, against: req))
+    }
+
+    /// End to end against a local fake of the GitHub API: good update installs, bad ones never touch the app.
+    static func updateInstallFlow() {
+        guard let req = CodeIdentity.runningAppRequirement(), !CodeIdentity.runningAppIsAdHoc,
+              let cert = signingCertificateHash() else {
+            print("SKIP  install flow: needs the AudioHub Local Signing certificate")
+            return
+        }
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("ah-update-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let current = AppVersion.current
+
+        /// A copy of this build with another version, signed with `identity` (cert hash or "-"), zipped.
+        func makeArchive(version: String, identity: String) -> Data? {
+            let dir = root.appendingPathComponent("src-\(UUID().uuidString)")
+            let app = dir.appendingPathComponent("AudioHub.app")
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            guard (try? fm.copyItem(at: Bundle.main.bundleURL, to: app)) != nil else { return nil }
+            _ = shell("/usr/bin/plutil", ["-replace", "CFBundleShortVersionString", "-string", version,
+                                          app.appendingPathComponent("Contents/Info.plist").path])
+            _ = shell("/usr/bin/codesign", ["-s", identity, "-i", "local.audiohub", "-f", app.path])
+            let zip = dir.appendingPathComponent("a.zip")
+            _ = shell("/usr/bin/ditto", ["-c", "-k", "--keepParent", app.path, zip.path])
+            return try? Data(contentsOf: zip)
+        }
+        func freshTarget() -> URL {
+            let dir = root.appendingPathComponent("installed-\(UUID().uuidString)")
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let app = dir.appendingPathComponent("AudioHub.app")
+            try? fm.copyItem(at: Bundle.main.bundleURL, to: app)
+            return app
+        }
+        func version(of app: URL) -> String {
+            let d = try? Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+            let p = d.flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+            return p?["CFBundleShortVersionString"] as? String ?? "?"
+        }
+
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        guard let good = makeArchive(version: "99.0.0", identity: cert),
+              let adhoc = makeArchive(version: "99.0.0", identity: "-"),
+              let same = makeArchive(version: current, identity: cert) else {
+            check("install flow: test archives built", false); return
+        }
+        let server = StaticHTTPServer()
+        defer { server.stop() }
+        guard server.port != 0 else { check("install flow: local server starts", false); return }
+        UpdateConfig.apiBaseOverride = URL(string: "http://127.0.0.1:\(server.port)")
+        defer { UpdateConfig.apiBaseOverride = nil }
+
+        /// Publishes `zip` as release `version` with `signature`, then runs the installer on a fresh copy.
+        func attempt(_ name: String, version: String, zip: Data, signature: String, advertisedSize: Int? = nil)
+            -> (result: Result<Void, Error>, target: URL) {
+            let base = "http://127.0.0.1:\(server.port)"
+            server.routes = [
+                "/repos/test/app/releases/latest": Data("""
+                {"tag_name":"v\(version)","html_url":"https://github.com/test/app/releases/tag/v\(version)","body":"",
+                 "assets":[{"name":"AudioHub-\(version).zip","size":\(advertisedSize ?? zip.count),
+                            "browser_download_url":"\(base)/dl/AudioHub-\(version).zip"},
+                           {"name":"AudioHub-\(version).zip.sig","size":\(signature.utf8.count),
+                            "browser_download_url":"\(base)/dl/AudioHub-\(version).zip.sig"}]}
+                """.utf8),
+                "/dl/AudioHub-\(version).zip": zip,
+                "/dl/AudioHub-\(version).zip.sig": Data(signature.utf8),
+            ]
+            let target = freshTarget()
+            let result: Result<Void, Error> = blocking {
+                let data = try await UpdateInstaller.fetch(
+                    UpdateConfig.apiBase.appendingPathComponent("repos/test/app/releases/latest"), limit: 1_000_000)
+                let release = try ReleaseInfo.parse(data)
+                try await UpdateInstaller(release: release, publicKey: pub, target: target, requirement: req).run()
+            }
+            return (result, target)
+        }
+        let sign = { (d: Data) in (try? UpdateSignature.sign(d, with: key)) ?? "" }
+
+        let ok = attempt("good", version: "99.0.0", zip: good, signature: sign(good))
+        if case .failure(let e) = ok.result { print("      error: \(e)") }
+        check("install flow: signed, newer, same identity → installed",
+              (try? ok.result.get()) != nil && version(of: ok.target) == "99.0.0" && CodeIdentity.validate(ok.target, against: req))
+
+        func refused(_ label: String, _ a: (result: Result<Void, Error>, target: URL)) {
+            var failed = false
+            if case .failure(let e) = a.result { failed = true; print("      reason: \(e)") }
+            check("install flow: \(label) → refused, installed app untouched",
+                  failed && version(of: a.target) == current && CodeIdentity.validate(a.target, against: req))
+        }
+        var tampered = good; tampered[tampered.count / 2] ^= 0xFF
+        refused("tampered archive", attempt("tampered", version: "99.0.0", zip: tampered, signature: sign(good)))
+        let otherKey = (try? UpdateSignature.sign(good, with: Curve25519.Signing.PrivateKey())) ?? ""
+        refused("signed with another key", attempt("otherkey", version: "99.0.0", zip: good, signature: otherKey))
+        refused("app signed by a different identity", attempt("adhoc", version: "99.0.0", zip: adhoc, signature: sign(adhoc)))
+        refused("not newer than installed", attempt("same", version: current, zip: same, signature: sign(same)))
+        refused("size differs from the release", attempt("size", version: "99.0.0", zip: good, signature: sign(good),
+                                                         advertisedSize: good.count + 1))
+    }
+
+    static func signingCertificateHash() -> String? {
+        let out = shell("/usr/bin/security", ["find-identity", "-p", "codesigning"])
+        return out.split(separator: "\n").first { $0.contains("\"AudioHub Local Signing\"") }?
+            .split(separator: " ").dropFirst().first.map(String.init)
+    }
+
+    @discardableResult
+    static func shell(_ tool: String, _ args: [String]) -> String {
+        let p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        try? p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func blocking<T>(_ work: @escaping () async throws -> T) -> Result<T, Error> {
+        let sem = DispatchSemaphore(value: 0)
+        var out: Result<T, Error>!
+        Task.detached {
+            do { out = .success(try await work()) } catch { out = .failure(error) }
+            sem.signal()
+        }
+        sem.wait()
+        return out
+    }
+
     // MARK: ALAC
 
     static func alacFraming() {
@@ -546,5 +762,45 @@ final class FakeConnection {
         guard !closed else { return }
         closed = true
         close(fd)
+    }
+}
+
+/// Loopback HTTP server with a fixed path → body map (for the update flow test).
+final class StaticHTTPServer {
+    var routes: [String: Data] = [:]
+    private let listener: NWListener?
+    private let queue = DispatchQueue(label: "selftest.http")
+    var port: UInt16 { listener?.port?.rawValue ?? 0 }
+
+    init() {
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try? NWListener(using: params)
+        let ready = DispatchSemaphore(value: 0)
+        listener?.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        listener?.newConnectionHandler = { [weak self] c in self?.serve(c) }
+        listener?.start(queue: queue)
+        _ = ready.wait(timeout: .now() + 2)
+    }
+
+    func stop() { listener?.cancel() }
+
+    private func serve(_ c: NWConnection, buffer: Data = Data()) {
+        if buffer.isEmpty { c.start(queue: queue) }
+        c.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, _, _ in
+            guard let self else { return }
+            var buf = buffer
+            if let data { buf.append(data) }
+            guard buf.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                if data != nil { self.serve(c, buffer: buf) } else { c.cancel() }
+                return
+            }
+            let line = String(decoding: buf, as: UTF8.self).split(whereSeparator: \.isNewline).first ?? ""
+            let path = line.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+            let body = self.routes[path]
+            var out = Data("HTTP/1.1 \(body == nil ? "404 Not Found" : "200 OK")\r\nContent-Length: \(body?.count ?? 0)\r\nConnection: close\r\n\r\n".utf8)
+            if let body { out.append(body) }
+            c.send(content: out, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in c.cancel() })
+        }
     }
 }
