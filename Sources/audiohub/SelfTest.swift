@@ -21,6 +21,7 @@ enum SelfTest {
         ringBufferStress()
         alacFraming()
         airplayResend()
+        stereoDelay()
         httpValidation()
         httpServerLive()
         castFraming()
@@ -294,6 +295,71 @@ enum SelfTest {
         let huge = AirPlaySession.retransmissions(for: req(100, 0xFFFF), history: h)
         check("resend: absurd counts are capped", (huge?.packets.count ?? 0) + (huge?.missing ?? 0) <= 512)
         check("resend: other control packets ignored", AirPlaySession.retransmissions(for: [0x80, 0xD4, 0, 7, 0, 0, 0, 0], history: h) == nil)
+    }
+
+    // MARK: Stereo pair delay line
+
+    final class CaptureSink: AudioSink {
+        var left: [Float] = []
+        func consume(_ stereo: UnsafePointer<Float>, frames: Int, sampleRate: Double) {
+            for f in 0 ..< frames { left.append(stereo[2 * f]) }   // splitter outputs mono pairs
+        }
+    }
+
+    /// Feeds `input(i)` through a splitter in 512-frame blocks; `atFrame` runs before each block.
+    static func runSplitter(_ split: StereoSplitSink, frames: Int, input: (Int) -> Float, atFrame: (Int) -> Void) {
+        var block = [Float](repeating: 0, count: 1024)
+        var i = 0
+        while i < frames {
+            atFrame(i)
+            let n = min(512, frames - i)
+            for f in 0 ..< n { let v = input(i + f); block[2 * f] = v; block[2 * f + 1] = v }
+            block.withUnsafeBufferPointer { split.consume($0.baseAddress!, frames: n, sampleRate: 48_000) }
+            i += n
+        }
+    }
+
+    static func stereoDelay() {
+        // 1. Exact delay: an impulse comes out 100 ms (4800 samples) later on the right only.
+        let l1 = CaptureSink(), r1 = CaptureSink()
+        let s1 = StereoSplitSink(left: l1, right: r1)
+        s1.delayMs = 100
+        runSplitter(s1, frames: 40_000, input: { $0 == 20_000 ? 1 : 0 }, atFrame: { _ in })
+        let li = l1.left.firstIndex { $0 > 0.5 }, ri = r1.left.firstIndex { $0 > 0.5 }
+        check("stereo: delay is exact to the sample (right +4800)", li == 20_000 && ri == 24_800, "left \(li ?? -1), right \(ri ?? -1)")
+
+        // 2. Moving the slider while a 50 Hz tone plays must not create a step.
+        func maxStep(fadeless: Bool) -> Float {
+            let l = CaptureSink(), r = CaptureSink()
+            let s = StereoSplitSink(left: l, right: r)
+            if fadeless {
+                // Control experiment: a tap with a 1-sample "fade" jumps like the old code did.
+                var tap = DelayTap()
+                var line = [Float](repeating: 0, count: 96_000)
+                var out: [Float] = []
+                for i in 0 ..< 96_000 {
+                    line[i] = 0.5 * sin(2 * .pi * 50 * Float(i) / 48_000)
+                    tap.retarget(i < 48_000 ? 0 : 1_790, fadeLength: 1)
+                    out.append(line.withUnsafeMutableBufferPointer { tap.next(from: $0.baseAddress!, write: i, capacity: 96_000) })
+                }
+                return zip(out.dropFirst(), out).map { abs($0 - $1) }.max() ?? 0
+            }
+            runSplitter(s, frames: 96_000, input: { 0.5 * sin(2 * .pi * 50 * Float($0) / 48_000) },
+                        atFrame: { i in if i == 48_128 { s.delayMs = 37.3 } })
+            return zip(r.left.dropFirst(), r.left).map { abs($0 - $1) }.max() ?? 0
+        }
+        let smooth = maxStep(fadeless: false), jump = maxStep(fadeless: true)
+        // A 50 Hz sine at 0.5 changes by at most ~0.0033 per sample on its own.
+        check("stereo: delay change is click-free (max step \(String(format: "%.4f", smooth)))", smooth < 0.01)
+        check("stereo: control — an instant jump would step by \(String(format: "%.2f", jump))", jump > 0.1)
+
+        // 3. Several quick changes in a row settle on the last value.
+        let l3 = CaptureSink(), r3 = CaptureSink()
+        let s3 = StereoSplitSink(left: l3, right: r3)
+        runSplitter(s3, frames: 60_000, input: { $0 == 50_000 ? 1 : 0 },
+                    atFrame: { i in if i == 1_024 { s3.delayMs = 10 }; if i == 1_536 { s3.delayMs = 20 }; if i == 2_048 { s3.delayMs = -50 } })
+        let l3i = l3.left.firstIndex { $0 > 0.5 }, r3i = r3.left.firstIndex { $0 > 0.5 }
+        check("stereo: rapid changes end at the last value (left +2400)", l3i == 52_400 && r3i == 50_000, "left \(l3i ?? -1), right \(r3i ?? -1)")
     }
 
     // MARK: ALAC
