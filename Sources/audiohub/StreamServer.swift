@@ -10,9 +10,29 @@ import Network
 final class PCMStreamServer: AudioSink {
     static let maxRequestBytes = 8_192
     static let maxClients = 2
+    /// Audio handed to a client's connection but not yet accepted by the network stack is
+    /// capped; a client that falls further behind is disconnected instead of making the
+    /// queued sends grow without bound. Default: 3 s of 48 kHz stereo 16-bit.
+    static let defaultMaxInFlightBytes = 48_000 * 4 * 3
+    let maxInFlightBytes: Int
+
     private let listener: NWListener
     private let queue = DispatchQueue(label: "audiohub.http")
-    private var clients: [ObjectIdentifier: NWConnection] = [:]
+
+    /// Touched only on `queue` (connections are started on it, so their completions run there).
+    private final class Client {
+        let connection: NWConnection
+        var inFlight = 0
+        init(_ c: NWConnection) { connection = c }
+    }
+    private var clients: [ObjectIdentifier: Client] = [:]
+    private var slowClientDisconnects = 0
+    private var maxInFlightSeen = 0
+
+    /// For diagnostics and tests.
+    func clientStats() -> (clients: Int, slowDisconnects: Int, maxInFlight: Int) {
+        queue.sync { (clients.count, slowClientDisconnects, maxInFlightSeen) }
+    }
     private var timer: DispatchSourceTimer?
 
     // Real-time thread → lock-free ring → `queue`. ~5 s of stereo 16-bit at 48 kHz.
@@ -45,12 +65,13 @@ final class PCMStreamServer: AudioSink {
             stopped = true
             timer?.cancel()
             listener.cancel()
-            clients.values.forEach { $0.cancel() }
+            clients.values.forEach { $0.connection.cancel() }
             clients.removeAll()
         }
     }
 
-    init() throws {
+    init(maxInFlightBytes: Int = PCMStreamServer.defaultMaxInFlightBytes) throws {
+        self.maxInFlightBytes = maxInFlightBytes
         produceScratch = .allocate(capacity: Self.maxBlockSamples)
         drainScratch = .allocate(capacity: 48_000 * 2)
         let params = NWParameters.tcp
@@ -77,7 +98,7 @@ final class PCMStreamServer: AudioSink {
         // No queue.sync here: the last reference may be dropped on `queue` itself.
         timer?.cancel()
         listener.cancel()
-        clients.values.forEach { $0.cancel() }
+        clients.values.forEach { $0.connection.cancel() }
         produceScratch.deallocate()
         drainScratch.deallocate()
     }
@@ -118,9 +139,25 @@ final class PCMStreamServer: AudioSink {
             log("stream: clients=\(clients.count) sent=\(statBytes / 1024) KB peak=\(String(format: "%.2f", Double(statPeak) / 32767))")
             statBytes = 0; statPeak = 0; statSince = Date()
         }
-        for (key, c) in clients {
-            c.send(content: chunk, completion: .contentProcessed { [weak self] err in
-                if err != nil { self?.queue.async { self?.clients[key]?.cancel(); self?.clients[key] = nil } }
+        for (key, client) in clients {
+            if client.inFlight + chunk.count > maxInFlightBytes {
+                // The speaker stopped reading (stalled, or the network can't keep up).
+                slowClientDisconnects += 1
+                log("stream: client is \(client.inFlight / 1024) KB behind, disconnecting it")
+                client.connection.cancel()
+                clients[key] = nil
+                continue
+            }
+            client.inFlight += chunk.count
+            maxInFlightSeen = max(maxInFlightSeen, client.inFlight)
+            let size = chunk.count
+            client.connection.send(content: chunk, completion: .contentProcessed { [weak self, weak client] err in
+                // Runs on `queue`.
+                client?.inFlight -= size
+                if err != nil, let self, self.clients[key] != nil {
+                    self.clients[key]?.connection.cancel()
+                    self.clients[key] = nil
+                }
             })
         }
     }
@@ -157,7 +194,7 @@ final class PCMStreamServer: AudioSink {
             }
             response.append(Self.wavHeader(sampleRate: UInt32(self.sampleRate > 0 ? self.sampleRate : 48_000)))
             c.send(content: response, completion: .contentProcessed { _ in })
-            self.clients[ObjectIdentifier(c)] = c
+            self.clients[ObjectIdentifier(c)] = Client(c)
         }
     }
 

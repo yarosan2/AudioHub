@@ -31,6 +31,7 @@ enum SelfTest {
         httpValidation()
         httpServerLive()
         chromecastFixture()
+        streamBackpressure()
         updateVersions()
         updateReleaseParsing()
         updateSignatures()
@@ -158,6 +159,71 @@ enum SelfTest {
         let reply = String(decoding: TCPClient.exchange(port: server.port, live, readBytes: 200), as: UTF8.self)
         check("fixture: real Chromecast request gets 200 + WAV from the live server",
               reply.hasPrefix("HTTP/1.1 200") && reply.contains("RIFF"))
+    }
+
+    /// A client that stops reading must be dropped once it is too far behind, without
+    /// affecting a client that keeps up; queued data per client stays bounded.
+    static func streamBackpressure() {
+        let limit = 256 * 1024
+        guard let server = try? PCMStreamServer(maxInFlightBytes: limit) else { check("backpressure: server starts", false); return }
+        defer { server.stop() }
+        server.allow(client: "127.0.0.1")
+        let request = "GET \(server.path) HTTP/1.1\r\nHost: x\r\n\r\n"
+
+        // Slow client: tiny receive buffer, never reads after the request.
+        let slow = TCPClient.open(port: server.port, receiveBuffer: 4_096)
+        _ = request.utf8CString.withUnsafeBufferPointer { send(slow, $0.baseAddress, $0.count - 1, 0) }
+        // Fast client: reads everything as it arrives.
+        let fast = TCPClient.open(port: server.port)
+        _ = request.utf8CString.withUnsafeBufferPointer { send(fast, $0.baseAddress, $0.count - 1, 0) }
+        let stopReading = DispatchSemaphore(value: 0)
+        let fastDone = DispatchSemaphore(value: 0)
+        var fastBytes = 0
+        Thread.detachNewThread {
+            var buf = [UInt8](repeating: 0, count: 65_536)
+            while stopReading.wait(timeout: .now()) == .timedOut {
+                let n = recv(fast, &buf, buf.count, 0)
+                if n <= 0 { break }
+                fastBytes += n
+            }
+            fastDone.signal()
+        }
+        usleep(200_000)
+
+        // Produce audio ~4× faster than real time for up to 6 s (the audio thread never waits).
+        var block = [Float](repeating: 0.1, count: 4_800 * 2)   // 100 ms
+        let start = Date()
+        var droppedAt: TimeInterval?
+        var producedBytes = 0
+        while Date().timeIntervalSince(start) < 6 {
+            block.withUnsafeBufferPointer { server.consume($0.baseAddress!, frames: 4_800, sampleRate: 48_000) }
+            producedBytes += 4_800 * 4
+            usleep(25_000)
+            if droppedAt == nil, server.clientStats().slowDisconnects > 0 {
+                droppedAt = Date().timeIntervalSince(start)
+                usleep(500_000)   // keep streaming a bit to show the fast client survives
+                break
+            }
+        }
+        usleep(300_000)   // let the last chunks drain to the fast client
+        let stats = server.clientStats()
+        stopReading.signal(); shutdown(fast, SHUT_RDWR); _ = fastDone.wait(timeout: .now() + 2)
+        let headerBytes = 44 + "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n".utf8.count
+        // The slow client sees its connection closed once it finally reads.
+        var buf = [UInt8](repeating: 0, count: 65_536)
+        var slowClosed = false
+        for _ in 0 ..< 200 { let n = recv(slow, &buf, buf.count, 0); if n <= 0 { slowClosed = true; break } }
+        close(slow); close(fast)
+
+        check("backpressure: client that stopped reading is disconnected",
+              stats.slowDisconnects == 1 && slowClosed,
+              "disconnects \(stats.slowDisconnects), closed \(slowClosed)")
+        check("backpressure: data queued per client stays within the limit (\(stats.maxInFlight / 1024) KB ≤ \(limit / 1024) KB)",
+              stats.maxInFlight <= limit)
+        check("backpressure: the client that keeps up stays connected and gets every byte",
+              stats.clients == 1 && fastBytes == headerBytes + producedBytes,
+              "clients \(stats.clients), received \(fastBytes) of \(headerBytes + producedBytes)")
+        print("      slow client dropped after \(String(format: "%.1f", droppedAt ?? -1)) s")
     }
 
     /// Starts a real server on this Mac and talks to it over TCP.
@@ -740,6 +806,26 @@ struct BitReader {
 
 /// Tiny blocking TCP client for loopback tests.
 enum TCPClient {
+    /// Connected socket to 127.0.0.1:port (or -1). `receiveBuffer` shrinks SO_RCVBUF.
+    static func open(port: UInt16, receiveBuffer: Int32? = nil) -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        if var size = receiveBuffer {
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size))
+        }
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        if ok != 0 { close(fd); return -1 }
+        return fd
+    }
+
     static func exchange(port: UInt16, _ request: String, readBytes: Int, timeout: TimeInterval = 2) -> [UInt8] {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return [] }
