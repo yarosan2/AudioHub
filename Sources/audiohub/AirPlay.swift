@@ -63,12 +63,13 @@ final class AirPlaySession: AudioSink {
     private var localIP = "", remoteIP = "", interfaceName: String?
     private var announceURL: String { "rtsp://\(localIP)/\(sessionID)" }
 
-    // UDP. Audio and control packets share `controlSock` (RAOP allows any source port), so it
-    // has exactly one owner and is closed once, in stop(). `timingSock` is owned by
-    // `timingSource` and closed by its cancel handler.
+    // UDP. Audio and control packets share `controlSock` (RAOP allows any source port).
+    // Each socket is closed exactly once: by its read source's cancel handler once the
+    // source exists (`controlSource`, `timingSource`), otherwise directly in stop().
     private var controlSock: Int32 = -1, timingSock: Int32 = -1
     private var serverAudioPort: UInt16 = 0, serverControlPort: UInt16 = 0
     private var timingSource: DispatchSourceRead?
+    private var controlSource: DispatchSourceRead?
     private var syncTimer: DispatchSourceTimer?
     private var keepAlive: DispatchSourceTimer?
     private var drainTimer: DispatchSourceTimer?
@@ -81,6 +82,13 @@ final class AirPlaySession: AudioSink {
     private(set) var streaming = false
     // Diagnostics
     private var statPackets = 0, statSendErrors = 0, statPeak: Int16 = 0, statTiming = 0, statTicks = 0
+    private var statResendRequests = 0, statResent = 0, statResendMisses = 0
+
+    /// Recently sent RTP packets, for answering the speaker's retransmission requests.
+    /// Touched only on `queue` (sending happens in pump(), requests are read on `queue`).
+    private var history = PacketHistory(size: 512)   // ≈4 s at 125 packets/s
+    /// Debug: AUDIOHUB_DROP_EVERY=N skips sending every Nth packet (to exercise resends).
+    private let debugDropEvery = ProcessInfo.processInfo.environment["AUDIOHUB_DROP_EVERY"].flatMap(Int.init) ?? 0
 
     // Audio path: RT thread → lock-free float ring → converter (→44.1k Int16) → packets.
     // Everything on the consumer side is allocated once, when the first audio arrives.
@@ -133,13 +141,13 @@ final class AirPlaySession: AudioSink {
     func stop() {
         queue.sync {
             [syncTimer, keepAlive, drainTimer].forEach { $0?.cancel() }
-            timingSource?.cancel()
             if streaming { _ = try? request("TEARDOWN", announceURL, timeout: 1) }
             streaming = false
             rtsp?.close()
-            if controlSock >= 0 { close(controlSock); controlSock = -1 }
-            if timingSource == nil, timingSock >= 0 { close(timingSock) }  // never handed to the source
-            timingSock = -1
+            if let controlSource { controlSource.cancel() } else if controlSock >= 0 { close(controlSock) }
+            if let timingSource { timingSource.cancel() } else if timingSock >= 0 { close(timingSock) }
+            controlSource = nil; timingSource = nil
+            controlSock = -1; timingSock = -1
         }
     }
 
@@ -176,6 +184,7 @@ final class AirPlaySession: AudioSink {
         controlSock = try Self.udpSocket(interface: interfaceName)
         timingSock = try Self.udpSocket(interface: interfaceName)
         listenForTiming()
+        listenForControl()
 
         _ = try request("OPTIONS", "*")
 
@@ -233,8 +242,9 @@ final class AirPlaySession: AudioSink {
             self.sendSync()
             self.statTicks += 1
             if self.statTicks % 3 == 0 {
-                self.onStatus?("sent \(self.statPackets) packets (errors \(self.statSendErrors)), peak \(String(format: "%.2f", Double(self.statPeak) / 32767)), timing requests \(self.statTiming)")
+                self.onStatus?("sent \(self.statPackets) packets (errors \(self.statSendErrors)), peak \(String(format: "%.2f", Double(self.statPeak) / 32767)), timing requests \(self.statTiming), resend requests \(self.statResendRequests) → resent \(self.statResent), too old \(self.statResendMisses)")
                 self.statPackets = 0; self.statSendErrors = 0; self.statPeak = 0; self.statTiming = 0
+                self.statResendRequests = 0; self.statResent = 0; self.statResendMisses = 0
             }
         }
         sync.resume(); syncTimer = sync
@@ -304,7 +314,9 @@ final class AirPlaySession: AudioSink {
         pkt.append(firstPacket ? 0xE0 : 0x60)
         pkt.appendBE(seq); pkt.appendBE(rtpTime); pkt.appendBE(ssrc)
         pkt.append(Self.alacUncompressed(samples))
-        if Self.sendUDP(controlSock, pkt, to: remoteIP, port: serverAudioPort) < 0 { statSendErrors += 1 }
+        history.store(seq: seq, packet: pkt)
+        let skip = debugDropEvery > 0 && Int(seq) % debugDropEvery == 0 && !firstPacket
+        if !skip, Self.sendUDP(controlSock, pkt, to: remoteIP, port: serverAudioPort) < 0 { statSendErrors += 1 }
         statPackets += 1
         for v in samples { statPeak = max(statPeak, v == .min ? .max : abs(v)) }
         firstPacket = false
@@ -324,6 +336,46 @@ final class AirPlaySession: AudioSink {
         pkt.appendBE(rtpTime)
         Self.sendUDP(controlSock, pkt, to: remoteIP, port: serverControlPort)
         firstSync = false
+    }
+
+    /// Reads the control port: the speaker asks for lost packets there (payload type 0x55).
+    private func listenForControl() {
+        let sock = controlSock
+        let src = DispatchSource.makeReadSource(fileDescriptor: sock, queue: queue)
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            var buf = [UInt8](repeating: 0, count: 2048)
+            let n = recv(sock, &buf, buf.count, 0)
+            guard n > 0 else { return }
+            let reply = Self.retransmissions(for: Array(buf[0 ..< n]), history: self.history)
+            guard let reply else { return }
+            self.statResendRequests += 1
+            self.statResent += reply.packets.count
+            self.statResendMisses += reply.missing
+            for p in reply.packets { Self.sendUDP(sock, p, to: self.remoteIP, port: self.serverControlPort) }
+        }
+        src.setCancelHandler { close(sock) }
+        src.resume()
+        controlSource = src
+    }
+
+    /// Parses a RAOP resend request (0x80 0xD5, seq, first missing seq, count) and builds the
+    /// replies: each is 0x80 0xD6 + 2 bytes + the original RTP packet. Packets no longer in
+    /// `history` are counted as missing. nil if `request` is not a resend request.
+    static func retransmissions(for request: [UInt8], history: PacketHistory) -> (packets: [Data], missing: Int)? {
+        guard request.count >= 8, request[1] & 0x7F == 0x55 else { return nil }
+        let first = UInt16(request[4]) << 8 | UInt16(request[5])
+        let count = min(Int(UInt16(request[6]) << 8 | UInt16(request[7])), history.size)
+        var packets: [Data] = []
+        var missing = 0
+        for i in 0 ..< count {
+            let seq = first &+ UInt16(truncatingIfNeeded: i)
+            guard let original = history.packet(seq: seq) else { missing += 1; continue }
+            var p = Data([0x80, 0xD6, 0x00, 0x01])
+            p.append(original)
+            packets.append(p)
+        }
+        return (packets, missing)
     }
 
     /// Answer the receiver's timing requests (0xD2) with our clock (0xD3).
@@ -471,4 +523,29 @@ struct BitWriter {
 
 extension Data {
     mutating func appendBE<T: FixedWidthInteger>(_ v: T) { Swift.withUnsafeBytes(of: v.bigEndian) { append(contentsOf: $0) } }
+}
+
+/// The last `size` RTP packets, addressed by sequence number (which wraps at 65536).
+struct PacketHistory {
+    let size: Int
+    private var seqs: [UInt16]
+    private var packets: [Data?]
+
+    init(size: Int) {
+        self.size = size
+        seqs = Array(repeating: 0, count: size)
+        packets = Array(repeating: nil, count: size)
+    }
+
+    mutating func store(seq: UInt16, packet: Data) {
+        let i = Int(seq) % size
+        seqs[i] = seq
+        packets[i] = packet
+    }
+
+    /// The packet with exactly this sequence number, if it is still remembered.
+    func packet(seq: UInt16) -> Data? {
+        let i = Int(seq) % size
+        return seqs[i] == seq ? packets[i] : nil
+    }
 }

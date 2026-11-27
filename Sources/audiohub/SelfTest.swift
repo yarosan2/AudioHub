@@ -20,6 +20,7 @@ enum SelfTest {
         ringBuffer()
         ringBufferStress()
         alacFraming()
+        airplayResend()
         httpValidation()
         httpServerLive()
         castFraming()
@@ -270,6 +271,29 @@ enum SelfTest {
         test(client)
         client.close()
         fake.finish()
+    }
+
+    // MARK: AirPlay retransmission
+
+    static func airplayResend() {
+        var h = PacketHistory(size: 512)
+        // Sequence numbers 65000 … 65535, 0 … 199: crosses the 16-bit wrap.
+        var seq: UInt16 = 65_000
+        for _ in 0 ..< 736 { h.store(seq: seq, packet: Data([0x80, 0x60, UInt8(seq >> 8), UInt8(seq & 0xFF)])); seq &+= 1 }
+
+        func req(_ first: UInt16, _ count: UInt16) -> [UInt8] {
+            [0x80, 0xD5, 0x00, 0x01, UInt8(first >> 8), UInt8(first & 0xFF), UInt8(count >> 8), UInt8(count & 0xFF)]
+        }
+        let r = AirPlaySession.retransmissions(for: req(65_534, 4), history: h)
+        let seqsOut = r?.packets.map { UInt16($0[6]) << 8 | UInt16($0[7]) }
+        check("resend: range across the 16-bit wrap", seqsOut == [65_534, 65_535, 0, 1] && r?.missing == 0)
+        check("resend: reply = 0x80 0xD6 + original packet",
+              r?.packets.first.map { Array($0.prefix(4)) == [0x80, 0xD6, 0x00, 0x01] && $0.count == 8 } == true)
+        let old = AirPlaySession.retransmissions(for: req(65_000, 2), history: h)   // overwritten by now
+        check("resend: packets older than the history are reported missing", old?.packets.isEmpty == true && old?.missing == 2)
+        let huge = AirPlaySession.retransmissions(for: req(100, 0xFFFF), history: h)
+        check("resend: absurd counts are capped", (huge?.packets.count ?? 0) + (huge?.missing ?? 0) <= 512)
+        check("resend: other control packets ignored", AirPlaySession.retransmissions(for: [0x80, 0xD4, 0, 7, 0, 0, 0, 0], history: h) == nil)
     }
 
     // MARK: ALAC
