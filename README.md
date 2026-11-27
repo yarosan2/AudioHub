@@ -112,14 +112,45 @@ app ──► Core Audio process tap (muted at its original output)
 | `Chromecast.swift` | Bonjour discovery, minimal Cast v2 sender (TLS + protobuf) |
 | `StreamServer.swift` | live WAV HTTP server for Chromecast |
 | `AirPlay.swift` | RAOP sender, resampling, ALAC framing, timing/sync |
-| `StereoPair.swift` | channel splitter with delay line and calibration clicks |
+| `StereoPair.swift` | channel splitter with crossfading delay line and calibration clicks |
+| `SPSCRing.swift` | lock-free ring between the audio thread and the senders |
+| `RTSP.swift` | RTSP client: one read loop, responses matched by CSeq |
+| `SelfTest.swift` | `audiohub selftest` |
 | `Engine.swift` | routing state, persistence, volume |
 | `MenuBarUI.swift` | SwiftUI menu-bar interface |
+
+## Security
+
+AudioHub only talks to devices on your local network.
+
+- **Chromecast stream.** The speaker fetches audio over HTTP from the Mac, so a port is open
+  on the LAN while a route is active. Each route uses a random 128-bit URL token, only
+  GET/HEAD on that exact path is served, and only to the IP address of the speaker the URL
+  was sent to. The port closes when the route stops.
+- **Chromecast control (TLS).** Cast devices use short-lived self-signed certificates, so
+  AudioHub accepts any certificate on port 8009 and does not yet implement Cast device
+  authentication. Someone who can intercept traffic on your LAN could impersonate a speaker:
+  see which stream URL it is given and receive volume commands. Do not rely on AudioHub on
+  untrusted networks.
+- **AirPlay** is unencrypted (RAOP with `et=0`): audio and volume commands travel in the
+  clear on the LAN.
+
+## Development
+
+```bash
+./build.sh                                          # build build/AudioHub.app
+build/AudioHub.app/Contents/MacOS/audiohub selftest # automated checks, no speakers needed
+```
+
+See [TESTING.md](TESTING.md) for what the checks cover, the ThreadSanitizer run, and manual
+scenarios with real speakers.
 
 ## Known limitations
 
 - AirPlay speakers that require pairing or encryption (e.g. HomePod) are not supported.
 - Chromecast latency is set by the speaker and cannot be lowered from the sender side.
+- Stereo pair: the offset is set by hand; clock drift between the two speakers is not yet
+  corrected automatically.
 - Safari's web audio comes from a WebKit process shared by all WebKit apps.
 - On a Mac with two network interfaces on the same subnet AudioHub tries each in turn.
 
