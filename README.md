@@ -44,7 +44,8 @@ scripts/install.sh             # builds and copies AudioHub to /Applications
 
 `install.sh` keeps the kind of build that is already installed: a release build (from GitHub
 or the in-app updater) stays a release build so one-click updates keep working. Override with
-`--release` or `--source`. It refuses to replace a newer installed version unless `--force`.
+`--release` or `--source`. It refuses to replace a newer installed version unless `--force`. The installed copy is only moved aside, never deleted, until the new one is in place and its
+signature and version check out; if anything fails, the previous version is put back.
 Or download the latest release.
 
 On first use macOS asks for two permissions:
