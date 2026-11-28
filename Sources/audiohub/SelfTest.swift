@@ -31,6 +31,7 @@ enum SelfTest {
         ("httpServerLive", httpServerLive),
         ("chromecastFixture", chromecastFixture),
         ("streamBackpressure", streamBackpressure),
+        ("streamIdleConnections", streamIdleConnections),
         ("sampleRateHandoff", sampleRateHandoff),
         ("updateVersions", updateVersions),
         ("updateReleaseParsing", updateReleaseParsing),
@@ -225,6 +226,60 @@ enum SelfTest {
               "saw \(seen) / \(seenAir)")
     }
 
+    /// Connections that never send a request must not pile up or lock the speaker out.
+    static func streamIdleConnections() {
+        let timeout = 2.0
+        guard let server = try? PCMStreamServer(headerTimeout: timeout) else { check("idle: server starts", false); return }
+        defer { server.stop() }
+        server.allow(client: "127.0.0.1")
+        let flood = 10, pendingCap = PCMStreamServer.maxPendingRequests
+        func legitRequest() -> String {
+            String(decoding: TCPClient.exchange(port: server.port, "GET \(server.path) HTTP/1.1\r\nHost: x\r\n\r\n", readBytes: 200), as: UTF8.self)
+        }
+        /// Instant check (no waiting, so the measurement can't overlap the timeout):
+        /// peek returns 0 = closed by the server, >0 = a reply (403) is there, -1/EAGAIN = still open.
+        func closedByServer(_ fds: [Int32]) -> Int {
+            fds.filter { fd in
+                var b = [UInt8](repeating: 0, count: 64)
+                return recv(fd, &b, b.count, MSG_PEEK | MSG_DONTWAIT) >= 0
+            }.count
+        }
+
+        // (a) Ten silent connections from another address on the network.
+        if let lan = TCPClient.firstLANAddress() {
+            let others = (0 ..< flood).map { _ in TCPClient.open(port: server.port, host: lan, from: lan) }.filter { $0 >= 0 }
+            usleep(200_000)
+            let st = server.connectionStats()
+            let served = legitRequest()
+            check("idle (a): \(others.count) silent connections from \(lan) refused at once, none left waiting",
+                  others.count == flood && st.pending == 0 && st.refused >= flood && closedByServer(others) == flood,
+                  "pending \(st.pending), refused \(st.refused)")
+            check("idle (a): the speaker is served immediately meanwhile",
+                  served.hasPrefix("HTTP/1.1 200") && served.contains("RIFF"))
+            others.forEach { close($0) }
+        } else {
+            print("SKIP  idle (a): no LAN address to connect from")
+        }
+
+        // (b) Ten silent connections from the speaker's own address (worst case).
+        let before = server.connectionStats()
+        let own = (0 ..< flood).map { _ in TCPClient.open(port: server.port) }.filter { $0 >= 0 }
+        usleep(200_000)
+        let during = server.connectionStats()
+        let excessClosed = closedByServer(own)   // only the over-cap ones are closed by now
+        check("idle (b): at most \(pendingCap) connections wait for a request; the rest are refused at once",
+              during.pending == pendingCap && during.refused - before.refused == flood - pendingCap && excessClosed == flood - pendingCap,
+              "pending \(during.pending), refused \(during.refused - before.refused), closed \(excessClosed)")
+        usleep(UInt32((timeout + 0.3) * 1_000_000))
+        let after = server.connectionStats()
+        check("idle (b): waiting connections are closed after the header timeout",
+              after.pending == 0 && after.headerTimeouts == pendingCap && closedByServer(own) == flood,
+              "pending \(after.pending), timeouts \(after.headerTimeouts)")
+        let served = legitRequest()
+        check("idle (b): the speaker is served again right after", served.hasPrefix("HTTP/1.1 200") && served.contains("RIFF"))
+        own.forEach { close($0) }
+    }
+
     /// A client that stops reading must be dropped once it is too far behind, without
     /// affecting a client that keeps up; queued data per client stays bounded.
     static func streamBackpressure() {
@@ -307,8 +362,11 @@ enum SelfTest {
         check("live: wrong token → 404", get("/stream.wav").hasPrefix("HTTP/1.1 404"))
         server.allow(client: "10.255.255.1")
         check("live: other client → 403", get(server.path).hasPrefix("HTTP/1.1 403"))
+        // Size limit from the allowed client (others are refused before anything is read).
+        server.allow(client: "127.0.0.1")
         let huge = TCPClient.exchange(port: port, String(repeating: "A", count: 20_000), readBytes: 100)
-        check("live: oversized request rejected", String(decoding: huge, as: UTF8.self).hasPrefix("HTTP/1.1 400") || huge.isEmpty)
+        check("live: oversized request from the speaker rejected with 400",
+              String(decoding: huge, as: UTF8.self).hasPrefix("HTTP/1.1 400") || huge.isEmpty)
         server.stop()
         // A listener that cannot start must make init fail instead of yielding a server without a port.
         let blocker = socket(AF_INET, SOCK_STREAM, 0)
@@ -911,10 +969,20 @@ struct BitReader {
 
 /// Tiny blocking TCP client for loopback tests.
 enum TCPClient {
-    /// Connected socket to 127.0.0.1:port (or -1). `receiveBuffer` shrinks SO_RCVBUF.
-    static func open(port: UInt16, receiveBuffer: Int32? = nil) -> Int32 {
+    /// Connected socket to host:port (default 127.0.0.1), optionally from a given local address
+    /// (or -1). `receiveBuffer` shrinks SO_RCVBUF.
+    static func open(port: UInt16, host: String = "127.0.0.1", from source: String? = nil, receiveBuffer: Int32? = nil) -> Int32 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return -1 }
+        if let source {
+            var local = sockaddr_in()
+            local.sin_family = sa_family_t(AF_INET)
+            local.sin_addr.s_addr = inet_addr(source)
+            let ok = withUnsafePointer(to: &local) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            if ok != 0 { close(fd); return -1 }
+        }
         if var size = receiveBuffer {
             setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size))
         }
@@ -923,12 +991,28 @@ enum TCPClient {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_addr.s_addr = inet_addr(host)
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         if ok != 0 { close(fd); return -1 }
         return fd
+    }
+
+    /// First non-loopback IPv4 address of this Mac, to act as "another host" in tests.
+    static func firstLANAddress() -> String? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let sa = p.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+                  p.pointee.ifa_flags & UInt32(IFF_UP) != 0, p.pointee.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
+            var a = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &a, &buf, socklen_t(INET_ADDRSTRLEN))
+            return String(cString: buf)
+        }
+        return nil
     }
 
     static func exchange(port: UInt16, _ request: String, readBytes: Int, timeout: TimeInterval = 2) -> [UInt8] {

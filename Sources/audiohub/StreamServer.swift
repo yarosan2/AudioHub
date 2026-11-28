@@ -10,6 +10,11 @@ import Network
 final class PCMStreamServer: AudioSink {
     static let maxRequestBytes = 8_192
     static let maxClients = 2
+    /// Accepted connections that have not sent a complete request yet. Without a cap and a
+    /// deadline, idle connections would pile up forever.
+    static let maxPendingRequests = 4
+    static let defaultHeaderTimeout: TimeInterval = 5
+    let headerTimeout: TimeInterval
     /// Audio handed to a client's connection but not yet accepted by the network stack is
     /// capped; a client that falls further behind is disconnected instead of making the
     /// queued sends grow without bound. Default: 3 s of 48 kHz stereo 16-bit.
@@ -28,6 +33,15 @@ final class PCMStreamServer: AudioSink {
     private var clients: [ObjectIdentifier: Client] = [:]
     private var slowClientDisconnects = 0
     private var maxInFlightSeen = 0
+    /// Connections waiting for their request headers (touched only on `queue`).
+    private var pending: [ObjectIdentifier: NWConnection] = [:]
+    private var refusedConnections = 0
+    private var headerTimeouts = 0
+
+    /// For diagnostics and tests.
+    func connectionStats() -> (pending: Int, clients: Int, refused: Int, headerTimeouts: Int) {
+        queue.sync { (pending.count, clients.count, refusedConnections, headerTimeouts) }
+    }
 
     /// For diagnostics and tests.
     func clientStats() -> (clients: Int, slowDisconnects: Int, maxInFlight: Int) {
@@ -69,12 +83,16 @@ final class PCMStreamServer: AudioSink {
             listener.cancel()
             clients.values.forEach { $0.connection.cancel() }
             clients.removeAll()
+            pending.values.forEach { $0.cancel() }
+            pending.removeAll()
         }
     }
 
     /// `port` is for tests; normally the system picks a free one.
-    init(maxInFlightBytes: Int = PCMStreamServer.defaultMaxInFlightBytes, port: NWEndpoint.Port = .any) throws {
+    init(maxInFlightBytes: Int = PCMStreamServer.defaultMaxInFlightBytes, port: NWEndpoint.Port = .any,
+         headerTimeout: TimeInterval = PCMStreamServer.defaultHeaderTimeout) throws {
         self.maxInFlightBytes = maxInFlightBytes
+        self.headerTimeout = headerTimeout
         produceScratch = .allocate(capacity: Self.maxBlockSamples)
         drainScratch = .allocate(capacity: 48_000 * 2)
         let params = NWParameters.tcp
@@ -115,6 +133,7 @@ final class PCMStreamServer: AudioSink {
         timer?.cancel()
         listener.cancel()
         clients.values.forEach { $0.connection.cancel() }
+        pending.values.forEach { $0.cancel() }
         produceScratch.deallocate()
         drainScratch.deallocate()
     }
@@ -182,27 +201,57 @@ final class PCMStreamServer: AudioSink {
     }
 
     private func accept(_ c: NWConnection) {
-        guard !stopped, clients.count < Self.maxClients else { c.cancel(); return }
+        guard !stopped else { c.cancel(); return }
+        // Only the speaker's address is ever served, so anyone else is turned away before we
+        // read anything: they cannot occupy request slots.
+        guard let allowed = allowedClient, Self.normalizeIP(Self.remoteIP(of: c)) == allowed else {
+            refusedConnections += 1
+            c.start(queue: queue)
+            reply(c, status: 403)
+            return
+        }
+        guard pending.count < Self.maxPendingRequests else {
+            refusedConnections += 1
+            log("HTTP: too many connections without a request, refusing one")
+            c.cancel()
+            return
+        }
+        let key = ObjectIdentifier(c)
+        pending[key] = c
         c.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + headerTimeout) { [weak self] in
+            guard let self, self.pending.removeValue(forKey: key) != nil else { return }
+            self.headerTimeouts += 1
+            log("HTTP: no complete request within \(self.headerTimeout) s, closing")
+            c.cancel()
+        }
         readRequest(c, buffer: Data())
+    }
+
+    private static func remoteIP(of c: NWConnection) -> String {
+        if case .hostPort(let host, _) = c.endpoint { return "\(host)" }
+        return ""
     }
 
     /// Reads until the end of the request headers (bounded), then answers or rejects.
     private func readRequest(_ c: NWConnection, buffer: Data) {
+        let key = ObjectIdentifier(c)
         c.receive(minimumIncompleteLength: 1, maximumLength: Self.maxRequestBytes) { [weak self] data, _, done, err in
             guard let self else { c.cancel(); return }
+            // Timed out or stopped meanwhile: the connection is already closed.
+            guard self.pending[key] != nil else { return }
             var buf = buffer
             if let data { buf.append(data) }
             let complete = buf.range(of: Data("\r\n\r\n".utf8)) != nil
             if !complete {
                 if err == nil, !done, buf.count < Self.maxRequestBytes { self.readRequest(c, buffer: buf) }
-                else { self.reply(c, status: 400) }
+                else { self.pending[key] = nil; self.reply(c, status: 400) }
                 return
             }
+            self.pending[key] = nil
             Self.dumpIfRequested(buf)
             let request = String(decoding: buf, as: UTF8.self)
-            let remote: String
-            if case .hostPort(let host, _) = c.endpoint { remote = "\(host)" } else { remote = "" }
+            let remote = Self.remoteIP(of: c)
             let status = Self.validate(request: request, remoteIP: remote, allowedIP: self.allowedClient, path: self.path)
             log("HTTP \(status) ← \(remote) \(request.split(separator: "\r\n").first.map { Self.redact($0) } ?? "?")")
             guard status == 200 else { self.reply(c, status: status); return }
@@ -211,15 +260,17 @@ final class PCMStreamServer: AudioSink {
                 c.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in c.cancel() })
                 return
             }
+            guard self.clients.count < Self.maxClients else { self.reply(c, status: 503); return }
             let r = self.rate.value
             response.append(Self.wavHeader(sampleRate: UInt32(r > 0 ? r : 48_000)))
             c.send(content: response, completion: .contentProcessed { _ in })
-            self.clients[ObjectIdentifier(c)] = Client(c)
+            self.clients[key] = Client(c)
         }
     }
 
     private func reply(_ c: NWConnection, status: Int) {
-        let text = [400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed"][status] ?? "Error"
+        let text = [400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+                    503: "Service Unavailable"][status] ?? "Error"
         let r = Data("HTTP/1.1 \(status) \(text)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
         c.send(content: r, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in c.cancel() })
     }
