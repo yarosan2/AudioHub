@@ -292,26 +292,21 @@ struct UpdateInstaller {
         return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
     }
 
-    static let session: URLSession = {
+    static var sessionConfiguration: URLSessionConfiguration {
         let c = URLSessionConfiguration.ephemeral
         c.httpAdditionalHeaders = ["User-Agent": "AudioHub-Updater"]
         c.timeoutIntervalForRequest = 30
-        return URLSession(configuration: c)
-    }()
+        return c
+    }
 
+    /// GET into memory, never holding more than `limit` bytes: refused up front if the server
+    /// announces a larger Content-Length, and aborted as soon as the received data would exceed
+    /// the limit (whether Content-Length was missing or wrong). Redirects are checked before
+    /// they are followed.
     static func fetch(_ url: URL, limit: Int, headers: [String: String] = [:]) async throws -> Data {
         var req = URLRequest(url: url)
         headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UserError(L("Download failed (HTTP %ld).", (response as? HTTPURLResponse)?.statusCode ?? 0))
-        }
-        // Redirects (GitHub → its CDN) must also stay on allowed hosts.
-        if let final = http.url, !UpdateConfig.isAllowedDownload(final) {
-            throw UserError(L("Refusing to download the update from an unexpected address."))
-        }
-        guard data.count <= limit else { throw UserError(L("The download is too large.")) }
-        return data
+        return try await LimitedDownload.get(req, limit: limit, configuration: sessionConfiguration).0
     }
 
     private static func run(_ tool: String, _ args: [String]) throws {
@@ -429,5 +424,91 @@ final class UpdateManager: ObservableObject {
         p.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"$0\"", path]
         try? p.run()
         NSApp.terminate(nil)
+    }
+}
+
+/// The download exceeded its size limit; `received` is how much was held when it was stopped.
+struct DownloadTooLarge: Error, CustomStringConvertible {
+    let received: Int
+    let announced: Int64?
+    var description: String { L("The download is too large.") }
+}
+
+/// Streams a response into memory with a hard size cap (see UpdateInstaller.fetch).
+final class LimitedDownload: NSObject, URLSessionDataDelegate {
+    private let limit: Int
+    private var data = Data()
+    private var response: HTTPURLResponse?
+    private var failure: Error?
+    private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+
+    private init(limit: Int) { self.limit = limit }
+
+    static func get(_ request: URLRequest, limit: Int,
+                    configuration: URLSessionConfiguration) async throws -> (Data, HTTPURLResponse) {
+        let d = LimitedDownload(limit: limit)
+        // Delegate callbacks run one at a time on the session's own serial queue.
+        let session = URLSession(configuration: configuration, delegate: d, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        return try await withCheckedThrowingContinuation { cont in
+            d.continuation = cont
+            session.dataTask(with: request).resume()
+        }
+    }
+
+    private func fail(_ e: Error, _ task: URLSessionTask) {
+        if failure == nil { failure = e }
+        task.cancel()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard let url = request.url, UpdateConfig.isAllowedDownload(url) else {
+            fail(UserError(L("Refusing to download the update from an unexpected address.")), task)
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            fail(UserError(L("Download failed (HTTP %ld).", (response as? HTTPURLResponse)?.statusCode ?? 0)), dataTask)
+            completionHandler(.cancel)
+            return
+        }
+        if let final = http.url, !UpdateConfig.isAllowedDownload(final) {
+            fail(UserError(L("Refusing to download the update from an unexpected address.")), dataTask)
+            completionHandler(.cancel)
+            return
+        }
+        let announced = http.expectedContentLength   // -1 when unknown
+        if announced > Int64(limit) {
+            fail(DownloadTooLarge(received: 0, announced: announced), dataTask)
+            completionHandler(.cancel)
+            return
+        }
+        self.response = http
+        if announced > 0 { data.reserveCapacity(Int(announced)) }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        guard failure == nil else { return }
+        guard data.count + chunk.count <= limit else {
+            fail(DownloadTooLarge(received: data.count, announced: response?.expectedContentLength), dataTask)
+            return
+        }
+        data.append(chunk)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let cont = continuation
+        continuation = nil
+        if let failure { cont?.resume(throwing: failure) }
+        else if let error { cont?.resume(throwing: error) }
+        else if let response { cont?.resume(returning: (data, response)) }
+        else { cont?.resume(throwing: UserError(L("Download failed (HTTP %ld).", 0))) }
     }
 }

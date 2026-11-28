@@ -38,6 +38,7 @@ enum SelfTest {
         ("updateSignatures", updateSignatures),
         ("updateCodeIdentity", updateCodeIdentity),
         ("updateInstallFlow", updateInstallFlow),
+        ("updateDownloadLimit", updateDownloadLimit),
         ("castFraming", castFraming),
         ("protobufDecoding", protobufDecoding),
         ("rtspParsing", rtspParsing),
@@ -63,7 +64,7 @@ enum SelfTest {
         var selected = all
         if let i = arguments.firstIndex(of: "--only"), i + 1 < arguments.count {
             let wanted = Set(arguments[i + 1].split(separator: ",").map(String.init))
-            selected = (all + [("tsanCanary", tsanCanary)]).filter { wanted.contains($0.name) }
+            selected = (all + [("tsanCanary", tsanCanary), ("updateLiveGitHub", updateLiveGitHub)]).filter { wanted.contains($0.name) }
             let unknown = wanted.subtracting(selected.map(\.name))
             if !unknown.isEmpty { print("unknown checks: \(unknown.sorted()); available: \(all.map(\.name))"); exit(2) }
         }
@@ -936,6 +937,78 @@ enum SelfTest {
               && SigningKeyStore.plan(embedded: pubB, activeKey: pub, nextKey: nil) == .mismatch)
     }
 
+    /// Downloads are capped while they stream, not after: an oversized answer must never be held
+    /// in memory in full.
+    static func updateDownloadLimit() {
+        let server = StaticHTTPServer()
+        defer { server.stop() }
+        guard server.port != 0 else { check("download limit: local server starts", false); return }
+        UpdateConfig.apiBaseOverride = URL(string: "http://127.0.0.1:\(server.port)")
+        defer { UpdateConfig.apiBaseOverride = nil }
+        let limit = 1 << 20, huge = 50 << 20
+        server.streams = [
+            "/exact": .init(total: limit, contentLength: "\(limit)"),
+            "/announced-too-big": .init(total: huge, contentLength: "\(huge)"),
+            "/no-length": .init(total: huge, contentLength: nil),
+            "/control": .init(total: huge, contentLength: nil),
+        ]
+        func get(_ path: String) -> (Result<Data, Error>, TimeInterval) {
+            let t = Date()
+            let r = blocking { try await UpdateInstaller.fetch(URL(string: "http://127.0.0.1:\(server.port)\(path)")!, limit: limit) }
+            return (r, Date().timeIntervalSince(t))
+        }
+        func tooLarge(_ r: Result<Data, Error>) -> DownloadTooLarge? {
+            if case .failure(let e) = r { return e as? DownloadTooLarge }; return nil
+        }
+
+        let (exact, _) = get("/exact")
+        check("download limit: a body of exactly the limit is accepted", (try? exact.get())?.count == limit)
+
+        let (announced, t1) = get("/announced-too-big")
+        check("download limit: Content-Length above the limit → refused before any body is kept",
+              tooLarge(announced)?.received == 0 && tooLarge(announced)?.announced == Int64(huge),
+              "\(announced)")
+        print(String(format: "      refused after %.2f s", t1))
+
+        let (streamed, t2) = get("/no-length")
+        usleep(300_000)
+        let sentNoLength = server.bytesSent("/no-length")
+        check("download limit: no Content-Length → stopped at the limit (held \((tooLarge(streamed)?.received ?? -1) / 1024) KB ≤ \(limit / 1024) KB)",
+              (tooLarge(streamed)?.received ?? .max) <= limit)
+        check("download limit: …and the transfer was cut off early (server sent \(sentNoLength >> 20) of \(huge >> 20) MB)",
+              sentNoLength < huge / 2)
+        print(String(format: "      stopped after %.2f s", t2))
+
+        // Control: the previous approach (URLSession.data(for:)) reads everything before any size check.
+        let control = blocking { try await URLSession(configuration: .ephemeral)
+            .data(from: URL(string: "http://127.0.0.1:\(server.port)/control")!).0 }
+        check("download limit: control — data(for:) downloads all \(huge >> 20) MB before it could check",
+              (try? control.get())?.count == huge)
+    }
+
+    /// Network check, only via `--only updateLiveGitHub`: the latest real release downloads through
+    /// GitHub's redirect to its CDN under the size cap, and its signature verifies.
+    static func updateLiveGitHub() {
+        guard let repo = UpdateConfig.repository, let key = UpdateConfig.publicKey else { check("live: repo and key configured", false); return }
+        let r: Result<(ReleaseInfo, Data, String), Error> = blocking {
+            let api = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
+            let release = try ReleaseInfo.parse(try await UpdateInstaller.fetch(api, limit: 1_000_000,
+                                                                               headers: ["Accept": "application/vnd.github+json"]))
+            guard let zip = release.zipURL, let sig = release.signatureURL else { throw UserError("release has no zip/sig") }
+            let data = try await UpdateInstaller.fetch(zip, limit: UpdateInstaller.maxArchiveBytes)
+            let signature = String(decoding: try await UpdateInstaller.fetch(sig, limit: 4_096), as: UTF8.self)
+            return (release, data, signature)
+        }
+        switch r {
+        case .failure(let e): check("live GitHub: download latest release", false, "\(e)")
+        case .success(let (release, data, signature)):
+            check("live GitHub: v\(release.version) zip downloaded via redirect (\(data.count) bytes, size matches)",
+                  release.zipSize == data.count)
+            check("live GitHub: its signature verifies with the embedded key",
+                  UpdateSignature.verify(data, signature: signature, publicKey: key))
+        }
+    }
+
     static func signingCertificateHash() -> String? {
         let out = shell("/usr/bin/security", ["find-identity", "-p", "codesigning"])
         return out.split(separator: "\n").first { $0.contains("\"AudioHub Local Signing\"") }?
@@ -1164,6 +1237,13 @@ final class FakeConnection {
 /// Loopback HTTP server with a fixed path → body map (for the update flow test).
 final class StaticHTTPServer {
     var routes: [String: Data] = [:]
+    /// Large generated bodies, sent in 64 KB chunks: total size and the Content-Length header to
+    /// announce (nil = none, the body ends when the connection closes).
+    struct Stream { let total: Int; let contentLength: String? }
+    var streams: [String: Stream] = [:]
+    private var sent: [String: Int] = [:]
+    /// Bytes of a stream's body actually written before it finished or the client went away.
+    func bytesSent(_ path: String) -> Int { queue.sync { sent[path] ?? 0 } }
     private let listener: NWListener?
     private let queue = DispatchQueue(label: "selftest.http")
     var port: UInt16 { listener?.port?.rawValue ?? 0 }
@@ -1181,6 +1261,21 @@ final class StaticHTTPServer {
 
     func stop() { listener?.cancel() }
 
+    private static let chunk = Data(count: 65_536)
+    private func sendChunks(_ c: NWConnection, path: String, remaining: Int) {
+        guard remaining > 0 else {
+            c.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in c.cancel() })
+            return
+        }
+        let n = min(remaining, Self.chunk.count)
+        c.send(content: Self.chunk.prefix(n), completion: .contentProcessed { [weak self] err in
+            guard let self else { return }
+            if err != nil { c.cancel(); return }   // client gone: stop
+            self.sent[path, default: 0] += n
+            self.sendChunks(c, path: path, remaining: remaining - n)
+        })
+    }
+
     private func serve(_ c: NWConnection, buffer: Data = Data()) {
         if buffer.isEmpty { c.start(queue: queue) }
         c.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, _, _ in
@@ -1193,6 +1288,15 @@ final class StaticHTTPServer {
             }
             let line = String(decoding: buf, as: UTF8.self).split(whereSeparator: \.isNewline).first ?? ""
             let path = line.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+            if let stream = self.streams[path] {
+                var head = "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                if let cl = stream.contentLength { head += "Content-Length: \(cl)\r\n" }
+                head += "\r\n"
+                self.sent[path] = 0
+                c.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+                self.sendChunks(c, path: path, remaining: stream.total)
+                return
+            }
             let body = self.routes[path]
             var out = Data("HTTP/1.1 \(body == nil ? "404 Not Found" : "200 OK")\r\nContent-Length: \(body?.count ?? 0)\r\nConnection: close\r\n\r\n".utf8)
             if let body { out.append(body) }

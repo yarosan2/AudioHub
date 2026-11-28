@@ -21,6 +21,7 @@ No speakers or permissions needed. Run it from the repository root (it reads
 | AirPlay resend | ranges across the 16-bit sequence wrap, reply format, too-old packets, capped counts |
 | Stereo delay | sample-exact delay, click-free delay changes (with a control run proving the check detects a jump), rapid changes |
 | ALAC | uncompressed frame layout and round-trip |
+| Update downloads | the size cap holds while streaming: exactly-the-limit accepted, an announced Content-Length above it refused before any body is kept, a body without Content-Length cut off at the limit (server sends ~1 of 50 MB), with a control showing `URLSession.data(for:)` would read all 50 MB first. Opt-in network check: `selftest --only updateLiveGitHub` downloads the latest real release through GitHub's CDN redirect and verifies its signature |
 | Updates | version comparison; `Tests/Fixtures/github-release-latest.json` (a real GitHub API answer) parses; allowed download hosts; Ed25519 sign/verify incl. tampering and wrong keys; code identity of copies (intact, modified, ad-hoc re-signed); **full install** against a local fake GitHub: a good update replaces the app, while a tampered archive, another key, another certificate, a non-newer version and a wrong size are all refused with the installed app untouched (needs the signing certificate, otherwise SKIP) |
 
 ### Recording a fixture from a real device
