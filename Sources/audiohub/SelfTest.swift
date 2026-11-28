@@ -41,6 +41,7 @@ enum SelfTest {
         ("castFraming", castFraming),
         ("protobufDecoding", protobufDecoding),
         ("rtspParsing", rtspParsing),
+        ("rtspContentLength", rtspContentLength),
         ("rtspLive", rtspLive),
     ]
 
@@ -473,6 +474,39 @@ enum SelfTest {
         if case .invalid = RTSPClient.parse(Data("HTTP/1.1 200 OK\r\n\r\n".utf8)) {
             check("RTSP parse: rejects non-RTSP status line", true)
         } else { check("RTSP parse: rejects non-RTSP status line", false) }
+    }
+
+    /// Content-Length must be absent (no body) or exactly one decimal number; anything else is
+    /// a malformed response, never silently "0".
+    static func rtspContentLength() {
+        func parse(_ head: String, body: String = "") -> RTSPClient.ParseResult {
+            RTSPClient.parse(Data("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\(head)\r\n\(body)".utf8))
+        }
+        func isInvalid(_ r: RTSPClient.ParseResult) -> Bool { if case .invalid = r { return true }; return false }
+        func body(_ r: RTSPClient.ParseResult) -> String? {
+            if case .response(let resp, _) = r { return String(decoding: resp.body, as: UTF8.self) }; return nil
+        }
+        check("Content-Length: abc → malformed (was treated as 0)", isInvalid(parse("Content-Length: abc\r\n", body: "xyz")))
+        check("Content-Length: -5 → malformed", isInvalid(parse("Content-Length: -5\r\n")))
+        check("Content-Length: +5 → malformed (Int(\"+5\") would accept it)", isInvalid(parse("Content-Length: +5\r\n", body: "12345")))
+        check("Content-Length beyond Int → malformed, no crash",
+              isInvalid(parse("Content-Length: 99999999999999999999999999\r\n")))
+        check("Content-Length: 5 5 / 5,5 → malformed",
+              isInvalid(parse("Content-Length: 5 5\r\n", body: "12345")) && isInvalid(parse("Content-Length: 5,5\r\n", body: "12345")))
+        check("Content-Length repeated with different values → malformed",
+              isInvalid(parse("Content-Length: 3\r\ncontent-length: 5\r\n", body: "12345")))
+        check("Content-Length repeated with the same value → accepted",
+              body(parse("Content-Length: 3\r\nContent-Length: 3\r\n", body: "abc")) == "abc")
+        check("Content-Length with surrounding spaces → accepted", body(parse("Content-Length:   4  \r\n", body: "abcd")) == "abcd")
+        check("Content-Length above the size limit → malformed",
+              isInvalid(parse("Content-Length: \(RTSPClient.maxResponseBytes + 1)\r\n")))
+        // No Content-Length: no body, and the next response right behind it is not swallowed.
+        let two = Data("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\nRTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n".utf8)
+        if case .response(let r, let used) = RTSPClient.parse(two),
+           case .response(let r2, _) = RTSPClient.parse(two.subdata(in: used ..< two.count)) {
+            check("no Content-Length → empty body, next response intact", r.body.isEmpty && r.cseq == 1 && r2.cseq == 2)
+        } else { check("no Content-Length → empty body, next response intact", false) }
+        check("Content-Length: 0 → empty body", body(parse("Content-Length: 0\r\n")) == "")
     }
 
     /// Runs RTSPClient against a scripted fake server on 127.0.0.1.

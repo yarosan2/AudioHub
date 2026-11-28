@@ -155,6 +155,20 @@ final class RTSPClient {
         case response(Response, consumed: Int)
     }
 
+    /// Body length from the Content-Length header values: none → 0 (no body); otherwise every
+    /// value must be a plain decimal number (digits only: no sign, spaces or lists), within
+    /// `maxResponseBytes`, and repeated headers must agree. Anything else → nil (malformed),
+    /// never a guess: a wrong length would split the stream at the wrong place.
+    static func contentLength(_ values: [String]) -> Int? {
+        guard let first = values.first else { return 0 }
+        guard values.allSatisfy({ $0 == first }),
+              !first.isEmpty, first.utf8.count <= 10,
+              first.utf8.allSatisfy({ $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }),
+              let n = Int(first), n <= maxResponseBytes
+        else { return nil }
+        return n
+    }
+
     /// Parses one response from the start of `d`. Headers are text, the body may be binary.
     static func parse(_ d: Data) -> ParseResult {
         guard let end = d.range(of: Data("\r\n\r\n".utf8)) else { return .incomplete }
@@ -163,12 +177,15 @@ final class RTSPClient {
         let statusLine = lines.removeFirst().split(separator: " ")
         guard statusLine.count >= 2, statusLine[0].hasPrefix("RTSP/"), let code = Int(statusLine[1]) else { return .invalid }
         var headers: [String: String] = [:]
+        var lengthValues: [String] = []
         for l in lines {
             guard let c = l.firstIndex(of: ":") else { continue }
-            headers[l[..<c].lowercased()] = l[l.index(after: c)...].trimmingCharacters(in: .whitespaces)
+            let name = l[..<c].lowercased()
+            let value = l[l.index(after: c)...].trimmingCharacters(in: .whitespaces)
+            if name == "content-length" { lengthValues.append(value) }
+            headers[name] = value
         }
-        let length = headers["content-length"].flatMap(Int.init) ?? 0
-        guard length >= 0, length <= maxResponseBytes else { return .invalid }
+        guard let length = contentLength(lengthValues) else { return .invalid }
         let bodyStart = end.upperBound
         guard d.endIndex - bodyStart >= length else { return .incomplete }
         let body = d.subdata(in: bodyStart ..< bodyStart + length)
