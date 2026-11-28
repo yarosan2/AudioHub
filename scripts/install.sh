@@ -12,7 +12,9 @@
 # The old copy is kept until the new one is in place and verified; any failure restores it.
 #
 # For tests: INSTALL_DIR (default /Applications), NO_LAUNCH=1 (do not stop/start the app),
-# INSTALL_TEST_FAIL=rename|verify (simulate a failure at that step).
+# INSTALL_TEST_FAIL=rename|verify (simulate a failure at that step),
+# INSTALL_TEST_CRASH=after-backup|after-rename|after-rename-corrupt (kill -9 the script there),
+# INSTALL_TEST_STOP=after-recovery (exit once crash recovery is done).
 set -e
 cd "$(dirname "$0")/.."
 
@@ -28,8 +30,38 @@ done
 
 DEST_DIR="${INSTALL_DIR:-/Applications}"
 DEST="$DEST_DIR/AudioHub.app"
+STAGED="$DEST.installing"
+BACKUP="$DEST.previous"
 INSTALLED_PLIST="$DEST/Contents/Info.plist"
 installed_value() { plutil -extract "$1" raw "$INSTALLED_PLIST" 2>/dev/null || true; }
+
+# An intact AudioHub: valid signature over all files, our bundle id, a version.
+app_ok() {
+  codesign --verify --deep --strict "$1" 2>/dev/null || return 1
+  [ "$(plutil -extract CFBundleIdentifier raw "$1/Contents/Info.plist" 2>/dev/null)" = local.audiohub ] || return 1
+  [ -n "$(plutil -extract CFBundleShortVersionString raw "$1/Contents/Info.plist" 2>/dev/null)" ] || return 1
+}
+
+# Recover from an earlier run that was interrupted (crash, power loss, kill) — before
+# anything else, so the version check below looks at the last good copy.
+[ -e "$STAGED" ] && rm -rf "$STAGED"
+if [ -d "$BACKUP" ]; then
+  if [ ! -e "$DEST" ]; then
+    # Interrupted after moving the old copy aside, before the new one was placed.
+    mv "$BACKUP" "$DEST" || { echo "✗ could not restore $BACKUP to $DEST; do it by hand"; exit 1; }
+    echo "Restored $DEST from an interrupted earlier install."
+  elif app_ok "$DEST"; then
+    # Interrupted after the new copy was placed: it checks out, so the backup can go.
+    echo "Found a backup from an interrupted earlier install; the installed copy verifies, removing the backup."
+    rm -rf "$BACKUP"
+  else
+    # Interrupted before the new copy was verified, and it does not verify: put the old one back.
+    echo "An earlier install was interrupted and left an unverified copy; restoring the previous version."
+    rm -rf "$DEST"
+    mv "$BACKUP" "$DEST" || { echo "✗ could not restore $BACKUP to $DEST; do it by hand"; exit 1; }
+  fi
+fi
+[ "$INSTALL_TEST_STOP" = after-recovery ] && { echo "(test: stopped after recovery)"; exit 0; }
 
 if [ "$MODE" = auto ]; then
   if [ "$(installed_value AHReleaseBuild)" = true ]; then
@@ -64,8 +96,6 @@ if [ "$NO_LAUNCH" != 1 ]; then
   sleep 1
 fi
 mkdir -p "$DEST_DIR"
-STAGED="$DEST.installing"
-BACKUP="$DEST.previous"
 had_old=0 placed=0
 
 rollback() {
@@ -86,13 +116,6 @@ rollback() {
 }
 fail_here() { [ "$INSTALL_TEST_FAIL" = "$1" ]; }
 
-# Leftovers of an interrupted earlier run.
-[ -e "$STAGED" ] && rm -rf "$STAGED"
-if [ -d "$BACKUP" ] && [ ! -e "$DEST" ]; then
-  mv "$BACKUP" "$DEST" && echo "Restored $DEST from an interrupted earlier install."
-fi
-[ -e "$BACKUP" ] && rm -rf "$BACKUP"
-
 # 1. Stage the new copy next to the destination (same volume, so the swaps are renames)
 #    and check it before touching the installed one.
 ditto build/AudioHub.app "$STAGED" || { rm -rf "$STAGED"; echo "✗ could not copy the new build; nothing changed"; exit 1; }
@@ -103,10 +126,15 @@ if [ -e "$DEST" ]; then
   mv "$DEST" "$BACKUP" || { rm -rf "$STAGED"; echo "✗ could not move the installed copy aside; nothing changed"; exit 1; }
   had_old=1
 fi
+[ "$INSTALL_TEST_CRASH" = after-backup ] && kill -9 $$
 
 # 3. Put the new one in place and verify it there.
 if fail_here rename || ! mv "$STAGED" "$DEST"; then rollback "could not put the new version in place"; fi
 placed=1
+if [ "$INSTALL_TEST_CRASH" = after-rename-corrupt ]; then
+  echo "/* damaged */" >> "$DEST/Contents/Resources/en.lproj/Localizable.strings"; kill -9 $$
+fi
+[ "$INSTALL_TEST_CRASH" = after-rename ] && kill -9 $$
 if fail_here verify || ! codesign --verify --deep --strict "$DEST" 2>/dev/null \
    || [ "$(plutil -extract CFBundleShortVersionString raw "$DEST/Contents/Info.plist" 2>/dev/null)" != "$NEW_VERSION" ]; then
   rollback "the installed copy failed verification"
