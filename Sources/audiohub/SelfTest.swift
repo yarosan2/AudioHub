@@ -508,6 +508,16 @@ enum SelfTest {
             check("no Content-Length → empty body, next response intact", r.body.isEmpty && r.cseq == 1 && r2.cseq == 2)
         } else { check("no Content-Length → empty body, next response intact", false) }
         check("Content-Length: 0 → empty body", body(parse("Content-Length: 0\r\n")) == "")
+
+        // CSeq routes the response to its request, so it must be unambiguous.
+        func raw(_ head: String) -> RTSPClient.ParseResult { RTSPClient.parse(Data("RTSP/1.0 200 OK\r\n\(head)\r\n".utf8)) }
+        func cseqOf(_ r: RTSPClient.ParseResult) -> Int? { if case .response(let x, _) = r { return x.cseq }; return nil }
+        check("CSeq repeated with different values → malformed", isInvalid(raw("CSeq: 3\r\nCSeq: 4\r\n")))
+        check("CSeq repeated with the same value → malformed", isInvalid(raw("CSeq: 3\r\ncseq: 3\r\n")))
+        check("CSeq: abc / -1 / +3 → malformed",
+              isInvalid(raw("CSeq: abc\r\n")) && isInvalid(raw("CSeq: -1\r\n")) && isInvalid(raw("CSeq: +3\r\n")))
+        check("single CSeq → matched number", cseqOf(raw("CSeq: 12\r\n")) == 12)
+        check("no CSeq → parsed, left unmatched by the client", { if case .response(let x, _) = raw(""), x.cseq == nil { return true }; return false }())
     }
 
     /// Runs RTSPClient against a scripted fake server on 127.0.0.1.
